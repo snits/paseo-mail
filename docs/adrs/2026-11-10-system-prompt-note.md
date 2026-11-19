@@ -20,7 +20,9 @@ fails the agent's creation if a hook throws.
   `server/system-prompt.ts`, 4 to 5 lines) to the agent's system prompt:
   - claim a name with `mail_register` first;
   - agents MUST use `mail_send` / `mail_reply` for all non-urgent communication with other
-    agents (updates, results, questions, handoffs, FYIs);
+    agents; when the work is tracked in a kata issue, the issue thread is the record, so
+    results, questions and decisions go in a kata comment and the mail carries only the issue
+    ref and what the recipient needs to do;
   - agents MUST NOT interrupt another agent with a direct prompt (`send_agent_prompt` or
     similar) unless it is urgent: the other agent is about to do something harmful, or the
     work is blocked right now and cannot wait for its next turn;

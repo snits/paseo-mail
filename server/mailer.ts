@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { Queue } from "./files";
 import { normalize, type Registry } from "./registry";
-import type { MailStore } from "./store";
+import { isLocal, type MailStore } from "./store";
 import { UserError, type AgentInfo, type Caller, type Mail, type PaseoPort, type Registration } from "./types";
 
 export interface MailerOptions {
@@ -211,7 +211,7 @@ export class Mailer {
 
   private ownMail(agentId: string, id: string): Mail {
     const mail = this.store.get(id.trim());
-    if (!mail || mail.to.agentId !== agentId) throw new UserError(`no mail "${id}" in your mailbox`);
+    if (!mail || !isLocal(mail) || mail.to.agentId !== agentId) throw new UserError(`no mail "${id}" in your mailbox`);
     return mail;
   }
 

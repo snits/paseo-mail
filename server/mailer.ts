@@ -3,7 +3,7 @@ import { HostBook, parseAddress } from "./address";
 import { Queue } from "./files";
 import { normalize, type Registry } from "./registry";
 import { isLocal, type MailStore } from "./store";
-import { UserError, type AgentInfo, type Caller, type Mail, type PaseoPort, type PublishedAddress, type Registration } from "./types";
+import { MailSchema, UserError, type AgentInfo, type Caller, type Drop, type HostDirectoryView, type Mail, type PaseoPort, type PublishedAddress, type Registration } from "./types";
 
 export interface MailerOptions {
   /** Delay before a nudge after new mail or a turn end, so a burst gives one nudge. */
@@ -12,7 +12,7 @@ export interface MailerOptions {
   sendGraceMs?: number;
   /** Retries when an agent still reads as running though no turn start was seen. */
   maxRetries?: number;
-  /** How often the outbox hand-off (and, later, the drop import) runs on its own. Default 60 s. */
+  /** How often the outbox hand-off and the drop import run on their own. Default 60 s. */
   sweepMs?: number;
   now?: () => string;
 }
@@ -98,6 +98,8 @@ export class Mailer {
   private readonly claims = new Queue();
   /** Hand-off passes run one at a time, so no drop is written twice. */
   private readonly handOffs = new Queue();
+  /** Import passes run one at a time, so no drop is stored twice. */
+  private readonly imports = new Queue();
   private sweep: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
   /** The last host directory snapshot; empty (own serverId and label empty, so nothing resolves) until the first read. */
@@ -462,17 +464,74 @@ export class Mailer {
     }
   }
 
-  /** Imports the mail linked hosts dropped on local agents (design step 8). Not implemented yet (red phase). */
+  /**
+   * Imports the mail linked hosts dropped on local agents (design step 8). Passes run one at a
+   * time; a call made after a drop lands runs a pass that sees it.
+   */
   importDrops(): Promise<void> {
-    return Promise.reject(new Error("importDrops is not implemented yet"));
+    return this.imports.run(() => this.importPass());
+  }
+
+  private async importPass(): Promise<void> {
+    if (this.disposed) return;
+    // A fresh read: if it throws, the pass touches nothing (the rejection reaches the caller).
+    const directory = await this.paseo.hostDirectory();
+    for (const drop of await this.paseo.localDrops()) {
+      try {
+        await this.importDrop(drop, directory);
+      } catch (error) {
+        // One drop that fails never holds back the others.
+        console.error(`[paseo-mail] importing mail ${drop.mailId} on ${drop.agentId} failed; it stays for the next pass:`, (error as Error).message);
+      }
+    }
+  }
+
+  /** Stores one drop in the holder's inbox, leaves it for a later pass (park), or clears it unstored. */
+  private async importDrop(drop: Drop, directory: HostDirectoryView): Promise<void> {
+    const where = `mail ${drop.mailId} on ${drop.agentId}`;
+    const parsed = MailSchema.safeParse(drop.value);
+    if (!parsed.success) return this.discard(drop, `${where} is not a mail`);
+    const mail = parsed.data;
+    const { serverId, agentId: senderId } = mail.from;
+    const host = serverId === null ? undefined : directory.hosts.find((entry) => entry.serverId === serverId);
+    if (serverId === null || !host) return this.discard(drop, `${where} comes from a host this daemon has no link to`);
+    if (senderId === null) return this.discard(drop, `${where} has no sender agent`);
+    if (!host.enabled || !host.online) {
+      console.error(`[paseo-mail] ${where} waits: its sender's host ${serverId} is ${host.enabled ? "offline" : "disabled"}`);
+      return;
+    }
+    // Throws when the host cannot be reached: the drop waits (logged by the pass).
+    if ((await this.paseo.peerAgent(serverId, senderId)) === null) return this.discard(drop, `${where} comes from agent ${senderId}, which does not exist on ${serverId}`);
+    if (this.store.get(mail.id)) {
+      await this.paseo.clearDrop(drop.agentId, drop.mailId);
+      return;
+    }
+    // A create that throws leaves the drop for the next pass (logged by the pass).
+    await this.store.create({
+      ...mail,
+      to: { agentId: drop.agentId, address: mail.to.address.split("@", 1)[0]!.trim(), serverId: null },
+      readAt: null,
+      nudgedAt: null,
+      seenAt: null,
+      bouncedAt: null,
+      handedOffAt: null,
+    });
+    this.schedule(drop.agentId);
+    await this.paseo.clearDrop(drop.agentId, drop.mailId);
+  }
+
+  /** Clears a drop that can never be imported, without storing it. */
+  private async discard(drop: Drop, why: string): Promise<void> {
+    console.error(`[paseo-mail] ${why}; clearing it unstored`);
+    await this.paseo.clearDrop(drop.agentId, drop.mailId);
   }
 
   // ---------------------------------------------------------------- lifecycle
 
   /**
    * After a (re)start: nudge agents holding mail they were not nudged about, publish every
-   * registry entry, watch the hosts, start the sweep and hand off the outbox. Each step is
-   * best-effort on its own, so one that fails never skips another.
+   * registry entry, watch the hosts and drops, start the sweep, import waiting drops and hand
+   * off the outbox. Each step is best-effort on its own, so one that fails never skips another.
    */
   async start(): Promise<void> {
     for (const agentId of this.store.pendingNudges()) this.schedule(agentId);
@@ -487,18 +546,20 @@ export class Mailer {
     try {
       this.paseo.watch({
         hostOnline: () => void this.refreshHosts().then(() => this.flushOutbox()).catch((error) => console.error("[paseo-mail] hand-off on host online failed:", (error as Error).message)),
-        dropsChanged: () => {},
+        dropsChanged: () => void this.importDrops().catch((error) => console.error("[paseo-mail] import on new drops failed:", (error as Error).message)),
       });
     } catch (error) {
       console.error("[paseo-mail] watching hosts failed:", (error as Error).message);
     }
     this.startSweep();
+    await this.importDrops().catch((error) => console.error("[paseo-mail] importing drops failed:", (error as Error).message));
     await this.flushOutbox().catch((error) => console.error("[paseo-mail] handing off the outbox failed:", (error as Error).message));
   }
 
   private startSweep(): void {
     if (this.sweep) return;
     this.sweep = setInterval(() => {
+      void this.importDrops().catch((error) => console.error("[paseo-mail] sweep import failed:", (error as Error).message));
       void this.flushOutbox().catch((error) => console.error("[paseo-mail] sweep hand-off failed:", (error as Error).message));
     }, this.sweepMs);
     (this.sweep as { unref?: () => void }).unref?.();
@@ -515,14 +576,17 @@ export class Mailer {
     this.schedule(agentId);
   }
 
-  /** Releases the agent's name and roles and returns its unread mail to the senders. */
+  /**
+   * Releases the agent's name and roles and returns its unread mail to the senders on this
+   * daemon. Mail from another daemon's agent is left as it is (not stamped, not returned).
+   */
   async onArchived(agentId: string): Promise<void> {
     this.cancel(agentId);
     this.inTurn.delete(agentId);
     this.sentAt.delete(agentId);
     await this.registry.remove(agentId);
     await this.publish(agentId, null);
-    const unread = this.store.unread(agentId).filter((mail) => mail.bouncedAt === null);
+    const unread = this.store.unread(agentId).filter((mail) => mail.bouncedAt === null && mail.from.serverId === null);
     if (unread.length === 0) return;
     const bouncedAt = this.now();
     await this.store.update(

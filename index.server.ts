@@ -65,6 +65,7 @@ export default function contribute(server: PluginServerContext) {
       quietly("turn.after", async () => {
         await enter(context.paseo);
         mailer.onTurnEnded(agent.id);
+        void mailer.importDrops().catch((error) => console.error("[paseo-mail] import after turn failed:", error));
       }),
     ),
     server.addHook("agent.archive.after", ({ agent }, context) =>

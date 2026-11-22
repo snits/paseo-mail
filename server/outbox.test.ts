@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setupPair, type FakeNetwork, type FakePaseo } from "../test/fixtures";
+import { FakeNetwork, setup, setupPair, type FakePaseo } from "../test/fixtures";
 import type { Mailer, MailerOptions } from "./mailer";
-import { UserError, type Mail } from "./types";
+import { UserError, type HostEntry, type Mail } from "./types";
 
 // Task 5 of paseo-mail#xsbz: outbox writers and hand-off (design steps 6, 7, 9 and 11).
 
@@ -35,6 +35,18 @@ async function linked(options: MailerOptions = {}) {
   const lead = pair.cantor.paseo.add("lead-id", { title: "Lead" });
   await pair.cantor.mailer.register(lead, { name: "lead" });
   return { ...pair, lead };
+}
+
+/** cantor and the Mac linked as in setupPair, with cantor's Mailer built but not started (no mailer on the Mac). */
+async function unstarted(options: MailerOptions = {}) {
+  const network = new FakeNetwork();
+  const cantorHost = network.host(CANTOR, "cantor");
+  const mac = network.host(MAC, "M2 Max");
+  network.link(CANTOR, MAC, { label: "m2-max" });
+  network.link(MAC, CANTOR, { label: "cantor" });
+  const cantor = await setup({ debounceMs: 60_000, ...options }, undefined, cantorHost);
+  mailers.push(cantor.mailer);
+  return { network, cantor, mac };
 }
 
 /** A third host, linked from cantor as "attic"; no mailer runs there. */
@@ -102,6 +114,15 @@ function peerCalls(paseo: FakePaseo): unknown[][] {
 
 const stamped = (store: { get(id: string): Mail | undefined }, id: string): boolean => (store.get(id)?.handedOffAt ?? null) !== null;
 
+/** Makes the port's directory report `serverId` with the given fields changed; the link itself is untouched. */
+function reportHost(paseo: FakePaseo, serverId: string, change: Partial<HostEntry>): void {
+  const directory = paseo.hostDirectory.bind(paseo);
+  paseo.hostDirectory = async () => {
+    const view = await directory();
+    return { ...view, hosts: view.hosts.map((host) => (host.serverId === serverId ? { ...host, ...change } : host)) };
+  };
+}
+
 /** Lets a promise reject without an unhandled-rejection report while the test still awaits it. */
 function quiet<T>(promise: Promise<T>): Promise<T> {
   promise.catch(() => undefined);
@@ -111,7 +132,9 @@ function quiet<T>(promise: Promise<T>): Promise<T> {
 describe("storing remote mail (design step 6)", () => {
   // Wrong: to.address normalized ("probe@m2-max") or cut to the local part ("Probe"); to.serverId as
   // the link label ("m2-max"); the remote copy stored as local mail (to.serverId null); the Delivery
-  // without serverId, or carrying the caller's title. writeDrop fails so the mail stays in the outbox.
+  // without serverId, or carrying the caller's title; the stored copy's from.serverId set (to the
+  // recipient's host) instead of null until the hand-off stamps the drop. writeDrop fails so the
+  // mail stays in the outbox.
   it("stores a resolved remote send as one outbox mail with to.address as typed", async () => {
     const { network, cantor, mac, lead } = await linked();
     publisher(mac.paseo, "other-id", "other", "Other");
@@ -122,7 +145,7 @@ describe("storing remote mail (design step 6)", () => {
     expect(deliveries[0]).toMatchObject({ address: "Probe@M2-Max", serverId: MAC, agentId: "probe-id", name: "probe", title: "Probe" });
     const id = deliveries[0]!.mailId;
     expect(cantor.store.get(id)).toMatchObject({
-      from: { agentId: "lead-id", name: "lead" },
+      from: { agentId: "lead-id", name: "lead", serverId: null },
       to: { serverId: MAC, agentId: "probe-id", address: "Probe@M2-Max" },
       subject: "Hello",
       body: "Body",
@@ -152,7 +175,8 @@ describe("dedup key of remote targets", () => {
 
   // Two addresses reach probe (by label and by serverId), a third reaches other. Right: 2.
   // Catches: key serverId alone (1); key by the address as typed (3). A key of agentId alone or of
-  // `${serverId}/${agentId}` also gives 2 here (the next two tests catch those).
+  // `${serverId}/${agentId}` also gives 2 here (the next two tests catch those). The copy keeps the
+  // first address typed for probe, as a local send does. Wrong: the last one ("Probe@srv_EntwLoR9srmD").
   it("stores one mail for two addresses that reach the same remote agent", async () => {
     const { network, cantor, mac, lead } = await linked();
     publisher(mac.paseo, "probe-id", "probe");
@@ -161,6 +185,7 @@ describe("dedup key of remote targets", () => {
     const deliveries = await cantor.mailer.send(lead, ["probe@m2-max", "Probe@srv_EntwLoR9srmD", "other@m2-max"], "s", "b");
     expect(deliveries).toHaveLength(2);
     expect(cantor.store.all().map((mail) => mail.to.agentId).sort()).toEqual(["other-id", "probe-id"]);
+    expect(cantor.store.all().map((mail) => mail.to.address).sort()).toEqual(["other@m2-max", "probe@m2-max"]);
   });
 
   // Both unresolved on the offline Mac. Right: 2. Catches: serverId alone (1), agentId alone (null
@@ -306,6 +331,8 @@ describe("reply to a remote sender (design step 9)", () => {
   // The sender is archived on the Mac, so a refusal here means an error or an offline host was taken
   // for "archived or missing". Wrong: folding a throw into "missing"; using the start() snapshot (Mac
   // online) when the directory read throws.
+  // The last two cases keep the Mac reachable (its lookup would say "archived") and only the directory
+  // entry rules it out. Wrong: ignoring `enabled`; ignoring `online` (both refuse).
   const cannotTell: { why: string; arrange: (network: FakeNetwork, cantor: FakePaseo) => void }[] = [
     {
       why: "the directory read throws",
@@ -315,6 +342,8 @@ describe("reply to a remote sender (design step 9)", () => {
     },
     { why: "the peerAgent lookup throws", arrange: (network) => network.fault(MAC, "peerAgent", true) },
     { why: "the host is offline", arrange: (network) => network.setReachable(CANTOR, MAC, false) },
+    { why: "the directory lists the host disabled (though online)", arrange: (_network, cantor) => reportHost(cantor, MAC, { enabled: false, online: true }) },
+    { why: "the directory lists the host offline (though reachable)", arrange: (_network, cantor) => reportHost(cantor, MAC, { online: false }) },
   ];
   it.each(cannotTell)("accepts a reply to an archived nameless sender into the outbox when $why", async ({ arrange }) => {
     const { network, cantor, mac, lead } = await linked();
@@ -325,6 +354,21 @@ describe("reply to a remote sender (design step 9)", () => {
     const delivery = await cantor.mailer.reply(lead, "m_in", "Answer");
     expect(delivery).toMatchObject({ serverId: MAC, agentId: "anon-id", address: "agent:anon-id" });
     expect(cantor.store.outbox().map((mail) => mail.id)).toEqual([delivery.mailId]);
+  });
+
+  // design A9: an archived sender with a name is not refused on an online host; the hand-off reaches
+  // whoever holds the name there now. Wrong: refusing every archived or missing sender, named or not.
+  it("accepts a reply to an archived named sender on an online host, and hands it to the name's holder", async () => {
+    const { cantor, mac, lead } = await linked();
+    mac.paseo.add("probe-id");
+    mac.paseo.archive("probe-id");
+    await cantor.store.create(fromMac("m_in", { agentId: "probe-id", name: "probe", title: "Probe" }));
+    const delivery = await cantor.mailer.reply(lead, "m_in", "Answer");
+    expect(delivery).toMatchObject({ serverId: MAC, agentId: "probe-id", address: "probe" });
+    expect(cantor.store.get(delivery.mailId)?.to).toEqual({ serverId: MAC, agentId: "probe-id", address: "probe" });
+    publisher(mac.paseo, "probe2-id", "probe");
+    await cantor.mailer.flushOutbox();
+    expect(writes(cantor.paseo).map((write) => [write.mail.id, write.agentId])).toEqual([[delivery.mailId, "probe2-id"]]);
   });
 });
 
@@ -458,6 +502,40 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     expect(stamped(cantor.store, "m_001")).toBe(true);
   });
 
+  // design step 7: the peer's published addresses are listed once per host per pass. Two unresolved
+  // mails to the Mac, one pass. Wrong: listing per mail (2 calls); never listing (nothing written).
+  it("lists a host's published addresses once per pass", async () => {
+    const { cantor, mac } = await linked();
+    publisher(mac.paseo, "other-id", "other");
+    publisher(mac.paseo, "probe-id", "probe");
+    await cantor.store.create(outMail("m_001", MAC, null, "probe@m2-max"));
+    await cantor.store.create(outMail("m_002", MAC, null, "other@m2-max"));
+    const mark = cantor.paseo.calls.length;
+    await cantor.mailer.flushOutbox();
+    expect(cantor.paseo.calls.slice(mark).filter((call) => call.op === "peerAddresses").map((call) => call.args)).toEqual([[MAC]]);
+    expect(writes(cantor.paseo).map((write) => [write.mail.id, write.agentId])).toEqual([
+      ["m_001", "probe-id"],
+      ["m_002", "other-id"],
+    ]);
+  });
+
+  // The directory lists the Mac disabled but online; the link stays usable, so a call would succeed.
+  // Wrong: handing off to any online host, enabled or not.
+  it("skips a host the directory lists as disabled", async () => {
+    const { cantor, mac } = await linked();
+    publisher(mac.paseo, "probe-id", "probe");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    const directory = cantor.paseo.hostDirectory.bind(cantor.paseo);
+    reportHost(cantor.paseo, MAC, { enabled: false, online: true });
+    await cantor.mailer.flushOutbox();
+    expect(peerCalls(cantor.paseo)).toEqual([]);
+    expect(stamped(cantor.store, "m_001")).toBe(false);
+    // Positive control: listed enabled again, the next pass hands it off.
+    cantor.paseo.hostDirectory = directory;
+    await cantor.mailer.flushOutbox();
+    expect(stamped(cantor.store, "m_001")).toBe(true);
+  });
+
   // quiet-id is live but publishes nothing. Wrong: checking a resolved recipient against the published
   // list (not found, re-resolved by "quiet", nobody: skipped).
   it("hands off to a live resolved recipient that is not in the published list", async () => {
@@ -487,12 +565,14 @@ describe("hand-off: flushOutbox (design step 7)", () => {
 
   // The reply form "agent:old-id" has no name. decoy-id publishes the name "old-id". Wrong: reading
   // the id as a name (handed to decoy-id); a parse error stopping the host (m_002 not handed off);
-  // handing off to the archived agent.
+  // handing off to the archived agent; reading the address kind ("agent") as the name (handed to
+  // agent-id, which publishes the name "agent").
   it("treats a recipient with no name as unresolvable, and later mail still goes", async () => {
     const { cantor, mac } = await linked();
     mac.paseo.add("old-id");
     mac.paseo.archive("old-id");
     publisher(mac.paseo, "decoy-id", "old-id");
+    publisher(mac.paseo, "agent-id", "agent");
     publisher(mac.paseo, "probe-id", "probe");
     await cantor.store.create(outMail("m_001", MAC, "old-id", "agent:old-id"));
     await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
@@ -535,6 +615,25 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     expect(cantor.paseo.parkedWrites).toBe(1);
     expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_001"]);
     expect(stamped(cantor.store, "m_001")).toBe(true);
+  });
+
+  // m_002 is stored while the first pass is parked on m_001's write. Wrong: a second call joining the
+  // pass already running (it read the outbox before m_002 existed, so m_002 waits for the sweep).
+  it("a flush called while a pass runs hands off mail stored after that pass began", async () => {
+    const { cantor, mac } = await linked();
+    publisher(mac.paseo, "probe-id", "probe");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    const release = cantor.paseo.holdWrites();
+    held.push(release);
+    const first = quiet(cantor.mailer.flushOutbox());
+    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
+    const second = quiet(cantor.mailer.flushOutbox());
+    release();
+    await second;
+    await first;
+    expect(stamped(cantor.store, "m_002")).toBe(true);
+    expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_001", "m_002"]);
   });
 
   // Wrong: calling an offline host anyway (the fake records the call before it throws).
@@ -640,6 +739,76 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
       await cantor.mailer.dispose();
       await mac.mailer.dispose();
       expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Only setInterval is faked, so the 59 s mark is reached without waiting. Wrong: any other default
+  // (1 s fires before the 59 s check; 120 s has not fired at 60 s). The expected 60 s is written here.
+  it("the sweep runs every 60 s by default", async () => {
+    const DEFAULT_SWEEP_MS = 60_000;
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const { cantor, mac } = await linked();
+      publisher(mac.paseo, "probe-id", "probe");
+      await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+      await vi.advanceTimersByTimeAsync(DEFAULT_SWEEP_MS - 1000);
+      expect(await until(() => stamped(cantor.store, "m_001"), 300)).toBe(false);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await until(() => stamped(cantor.store, "m_001"))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // start() handles the watch() throw on its own. Wrong: rethrowing it, which skips the sweep (and the
+  // startup flush). m_001 is stored after start(), so only the sweep can move it.
+  it("a watch() that throws does not stop the sweep", async () => {
+    const { cantor, mac } = await unstarted({ sweepMs: 20 });
+    cantor.paseo.watch = () => {
+      throw new Error("watch down");
+    };
+    publisher(mac, "probe-id", "probe");
+    const started = await cantor.mailer.start().then(
+      () => "resolved",
+      () => "rejected",
+    );
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    expect(await until(() => stamped(cantor.store, "m_001"))).toBe(true);
+    expect(started).toBe("resolved");
+  });
+
+  // Mail stored before start(), the default 60 s sweep, no send. Wrong: start() without its own flush.
+  it("start() hands off mail already in the outbox", async () => {
+    const { cantor, mac } = await unstarted();
+    publisher(mac, "probe-id", "probe");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    await cantor.mailer.start();
+    expect(await until(() => stamped(cantor.store, "m_001"), 500)).toBe(true);
+  });
+
+  // index.server.ts does not await start(); here start() is parked in its backfill when dispose() runs.
+  // Wrong: start() going on to watch the port and arm the sweep after dispose().
+  it("start() watches nothing and arms no timer when dispose() ran while it was in flight", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const { cantor } = await unstarted({ sweepMs: 20 });
+      await cantor.registry.set({ agentId: "a-carol", name: "carol", roles: [], workspaceId: null, projectId: null, updatedAt: "2026-11-22T10:00:00.000Z" });
+      const release = cantor.paseo.holdPublishes();
+      held.push(release);
+      const started = cantor.mailer.start();
+      expect(await until(() => cantor.paseo.parkedPublishes >= 1)).toBe(true);
+      await cantor.mailer.dispose();
+      release();
+      await started;
+      expect(cantor.paseo.calls.map((call) => call.op)).not.toContain("watch");
+      expect(vi.getTimerCount()).toBe(0);
+      // Positive control: a start() nobody disposes watches the port and arms one sweep.
+      const other = await unstarted({ sweepMs: 20 });
+      await other.cantor.mailer.start();
+      expect(other.cantor.paseo.calls.map((call) => call.op)).toContain("watch");
+      expect(vi.getTimerCount()).toBe(1);
     } finally {
       vi.useRealTimers();
     }

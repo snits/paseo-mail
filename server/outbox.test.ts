@@ -636,6 +636,33 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_001", "m_002"]);
   });
 
+  // Pass 1 parks on m_001's write; a second pass for m_002 (to other-id) is queued behind it; dispose()
+  // runs before the write is released. The fake's release() refuses nothing, so a queued pass that
+  // ran anyway would show as calls about other-id. Wrong: a pass that does not check for dispose()
+  // when it starts. Positive control: the same sequence without dispose() makes the second write.
+  it.each([true, false])("a pass queued before dispose() makes no peer call once dispose() has run (disposed: %s)", async (disposing) => {
+    const { cantor, mac } = await linked();
+    publisher(mac.paseo, "probe-id", "probe");
+    publisher(mac.paseo, "other-id", "other");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    const release = cantor.paseo.holdWrites();
+    held.push(release);
+    const first = quiet(cantor.mailer.flushOutbox());
+    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    await cantor.store.create(outMail("m_002", MAC, "other-id", "other@m2-max"));
+    const second = quiet(cantor.mailer.flushOutbox());
+    const disposed = disposing ? cantor.mailer.dispose() : Promise.resolve();
+    release();
+    await Promise.allSettled([first, second]);
+    await disposed;
+    const aboutOther = peerCalls(cantor.paseo).filter(([, , agentId]) => agentId === "other-id");
+    if (disposing) expect(aboutOther).toEqual([]);
+    else expect(aboutOther).toEqual([
+      ["peerAgent", MAC, "other-id"],
+      ["writeDrop", MAC, "other-id"],
+    ]);
+  });
+
   // Wrong: calling an offline host anyway (the fake records the call before it throws).
   it("skips a host that is not online", async () => {
     const { network, cantor, mac } = await linked();

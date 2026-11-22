@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import contribute from "./index.server";
+import { Mailer } from "./server/mailer";
 import { MAIL_NOTE } from "./server/system-prompt";
 import { tempDir } from "./test/fixtures";
 
@@ -112,5 +113,29 @@ describe("contribute", () => {
     await hooks.get("agent.turn.before")!({ agent: { id: "b" }, turnId: null }, context);
     await vi.waitFor(() => expect(patches).toEqual([{ id: "a-carol", patch: { "paseo-mail.address": { name: "carol", roles: ["ops"] } } }]));
     await cleanup();
+  });
+
+  // Task 6 of paseo-mail#xsbz (design step 8): every turn end runs an import pass, whether the hook
+  // calls importDrops itself or through the Mailer method it calls. The baseline is taken once start()
+  // has settled, since start() imports too. Wrong: turn.after only scheduling a nudge.
+  it("runs an import pass after each turn", async () => {
+    const start = vi.spyOn(Mailer.prototype, "start");
+    const importDrops = vi.spyOn(Mailer.prototype, "importDrops").mockResolvedValue(undefined);
+    try {
+      const hooks = new Map<string, Handler>();
+      const server = { addHook: (name: string, handler: Handler) => (hooks.set(name, handler), () => hooks.delete(name)), handle: () => undefined } as unknown as PluginServerContext;
+      const cleanup = contribute(server) as () => Promise<void>;
+      const context = { paseo: fakeApi([]), signal: new AbortController().signal };
+      await hooks.get("agent.turn.before")!({ agent: { id: "b" }, turnId: null }, context);
+      await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+      await start.mock.results[0]!.value;
+      const before = importDrops.mock.calls.length;
+      await hooks.get("agent.turn.after")!({ agent: { id: "b" }, turnId: null, outcome: { kind: "completed" }, timeline: [] }, context);
+      await vi.waitFor(() => expect(importDrops.mock.calls.length).toBeGreaterThan(before));
+      await cleanup();
+    } finally {
+      start.mockRestore();
+      importDrops.mockRestore();
+    }
   });
 });

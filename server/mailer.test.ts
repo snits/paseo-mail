@@ -223,6 +223,45 @@ describe("archived recipients", () => {
     await mailer.onArchived("bob-id");
     expect(mailer.list("alice-id")).toHaveLength(1);
   });
+
+  // Design step 9 (bounce half), acceptance 10; Task 6 of paseo-mail#xsbz. The remote sender's id is
+  // also a live local agent's id, so a local lookup of it finds someone. Wrong: stamping bouncedAt on
+  // every unread mail (m_remote stamped); looking the remote sender up locally (the lookup is recorded,
+  // and a "Returned:" mail lands with the local probe-id). Positive control: alice's mail still bounces.
+  it("leaves unread mail from a remote sender unbounced, with no local lookup; local senders still bounce", async () => {
+    const { mailer, paseo, store, alice } = await pair();
+    paseo.add("probe-id", { title: "Local Probe" });
+    await store.create({
+      id: "m_remote",
+      threadId: "m_remote",
+      inReplyTo: null,
+      from: { agentId: "probe-id", name: "probe", title: "Probe", serverId: "srv_EntwLoR9srmD" },
+      to: { agentId: "bob-id", address: "bob", serverId: null },
+      subject: "From afar",
+      body: "x",
+      createdAt: "2026-11-22T10:00:00.000Z",
+      readAt: null,
+      nudgedAt: null,
+      bouncedAt: null,
+      seenAt: null,
+      handedOffAt: null,
+    });
+    const [local] = await mailer.send(alice, ["bob"], "From alice", "y");
+    const lookups: string[] = [];
+    const agent = paseo.agent.bind(paseo);
+    paseo.agent = async (id: string) => {
+      lookups.push(id);
+      return agent(id);
+    };
+    paseo.archive("bob-id");
+    await mailer.onArchived("bob-id");
+    expect(store.get("m_remote")?.bouncedAt).toBeNull();
+    expect(lookups).not.toContain("probe-id");
+    expect(store.all().filter((mail) => mail.subject === "Returned: From afar")).toEqual([]);
+    expect(mailer.list("probe-id")).toEqual([]);
+    expect(store.get(local!.mailId)?.bouncedAt).not.toBeNull();
+    expect(mailer.list("alice-id").map((mail) => mail.subject)).toEqual(["Returned: From alice"]);
+  });
 });
 
 describe("idle nudge", () => {

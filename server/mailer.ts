@@ -462,6 +462,11 @@ export class Mailer {
     }
   }
 
+  /** Imports the mail linked hosts dropped on local agents (design step 8). Not implemented yet (red phase). */
+  importDrops(): Promise<void> {
+    return Promise.reject(new Error("importDrops is not implemented yet"));
+  }
+
   // ---------------------------------------------------------------- lifecycle
 
   /**

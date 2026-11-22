@@ -101,7 +101,7 @@ mail change, shows one pane at a time on phones, and is translated into French a
 | --- | --- | --- |
 | `mail_register` | `name?`, `roles?` | Claim or change your name and roles. `name: ""` releases the name, `roles: []` clears the roles, and no arguments shows your registration. |
 | `mail_directory` | none | List the registered names and roles, and the names published on online linked hosts as `name@host`. |
-| `mail_send` | `to`, `subject`, `body` | Send mail to a name, `role:<role>`, `agent:<agent id>`, `name@host`, or a list of them. No name needed to send; the result says to use a recipient's name from now on, and warns if you have none. |
+| `mail_send` | `to`, `subject`, `body` | Send mail to a name, `role:<role>`, `agent:<agent id>`, `name@host`, or a list of them. No name needed to send; the result says which address to use for a recipient from now on (`name`, or `name@host` on a linked host), and warns if you have none. |
 | `mail_list` | `unread_only?`, `limit?` | List your mail, newest first, without bodies. Needs a registered name. |
 | `mail_read` | `id` | Read one mail and mark it read. Needs a registered name. |
 | `mail_reply` | `id`, `body` | Reply to the sender, in the same thread. |

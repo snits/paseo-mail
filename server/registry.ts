@@ -4,7 +4,7 @@ import { z } from "zod";
 import { Queue, writeAtomic } from "./files";
 import { RegistrationSchema, UserError, type Registration } from "./types";
 
-const ADDRESS = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+export const ADDRESS = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 /** Lower-cases and trims a name or role, and refuses one that does not fit the pattern. */
 export function normalize(value: string, kind: "name" | "role"): string {

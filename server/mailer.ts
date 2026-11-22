@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
-import type { HostBook } from "./address";
+import { HostBook, parseAddress } from "./address";
 import { Queue } from "./files";
 import { normalize, type Registry } from "./registry";
 import { isLocal, type MailStore } from "./store";
-import { UserError, type AgentInfo, type Caller, type Mail, type PaseoPort, type Registration } from "./types";
+import { UserError, type AgentInfo, type Caller, type Mail, type PaseoPort, type PublishedAddress, type Registration } from "./types";
 
 export interface MailerOptions {
   /** Delay before a nudge after new mail or a turn end, so a burst gives one nudge. */
@@ -63,6 +63,8 @@ export class Mailer {
   /** Name claims run one at a time, so two agents cannot take the same name. */
   private readonly claims = new Queue();
   private disposed = false;
+  /** The last host directory snapshot; empty (own serverId and label empty, so nothing resolves) until the first read. */
+  private hostBook = new HostBook({ self: { serverId: "", label: "" }, hosts: [] });
   private readonly debounceMs: number;
   private readonly sendGraceMs: number;
   private readonly maxRetries: number;
@@ -118,9 +120,37 @@ export class Mailer {
     return result;
   }
 
-  /** Resolves one address to the live agents it reaches. Throws when it reaches none. */
-  async resolve(caller: Caller, address: string): Promise<{ agentId: string; registration: Registration | null; agent: AgentInfo }[]> {
-    const trimmed = address.trim();
+  /** Resolves one address to the agents it reaches, here or on a linked host. Throws when it reaches none. */
+  async resolve(caller: Caller, address: string): Promise<ResolvedTarget[]> {
+    const parsed = parseAddress(address);
+    if (parsed.host === null) return this.resolveLocal(caller, address.trim());
+    if (parsed.kind === "role") throw new UserError("addressing a role on another host (role:x@host) is planned, not available yet");
+    if (parsed.kind === "agent") throw new UserError("addressing an agent id on another host (agent:x@host) is unsupported; use its name");
+    const match = (await this.refreshHosts()).resolve(parsed.host);
+    if (match.kind === "local") return this.resolveLocal(caller, parsed.local);
+    const { serverId, online } = match.host;
+    if (online) {
+      let published: PublishedAddress[] | null = null;
+      try {
+        published = await this.paseo.peerAddresses(serverId);
+      } catch {
+        // The host reads online but cannot be listed: accept the mail unresolved, as for an offline host.
+      }
+      if (published) {
+        const holders = published.filter((entry) => entry.name === parsed.local);
+        if (holders.length === 0) throw new UserError(`no agent on host "${parsed.host}" is registered as "${parsed.local}"`);
+        if (holders.length > 1) {
+          const who = holders.map((holder) => (holder.title ? `${holder.agentId} ("${holder.title}")` : holder.agentId)).join(", ");
+          throw new UserError(`several agents on host "${parsed.host}" are registered as "${parsed.local}": ${who}`);
+        }
+        const [holder] = holders;
+        return [{ kind: "remote", serverId, agentId: holder!.agentId, name: holder!.name, title: holder!.title }];
+      }
+    }
+    return [{ kind: "remote", serverId, agentId: null, name: parsed.local, title: null }];
+  }
+
+  private async resolveLocal(caller: Caller, trimmed: string): Promise<(ResolvedTarget & { kind: "local" })[]> {
     if (trimmed.toLowerCase().startsWith(AGENT_PREFIX)) {
       // An agent id needs no registry entry (docs/adrs/2026-11-10-agent-id-addressing.md). Ids are case-sensitive.
       const id = trimmed.slice(AGENT_PREFIX.length).trim();
@@ -128,15 +158,15 @@ export class Mailer {
       const agent = await this.live(id);
       if (!agent) throw new UserError(`no live agent has the id "${id}" (it does not exist or is archived)`);
       if (agent.id === caller.id) throw new UserError("you cannot send mail to yourself");
-      return [{ agentId: agent.id, registration: this.registry.get(agent.id) ?? null, agent }];
+      return [{ kind: "local", agentId: agent.id, registration: this.registry.get(agent.id) ?? null, agent }];
     }
     if (trimmed.toLowerCase().startsWith(ROLE_PREFIX)) {
       const role = normalize(trimmed.slice(ROLE_PREFIX.length), "role");
-      const holders: { agentId: string; registration: Registration; agent: AgentInfo }[] = [];
+      const holders: { kind: "local"; agentId: string; registration: Registration; agent: AgentInfo }[] = [];
       for (const registration of this.registry.withRole(role)) {
         if (registration.agentId === caller.id) continue;
         const agent = await this.live(registration.agentId);
-        if (agent) holders.push({ agentId: agent.id, registration, agent });
+        if (agent) holders.push({ kind: "local", agentId: agent.id, registration, agent });
       }
       if (holders.length === 0) throw new UserError(`no live agent holds the role "${role}"`);
       const sameWorkspace = caller.workspaceId ? holders.filter((holder) => holder.registration.workspaceId === caller.workspaceId) : [];
@@ -150,17 +180,22 @@ export class Mailer {
     const agent = registration ? await this.live(registration.agentId) : null;
     if (!registration || !agent) throw new UserError(`no live agent is registered as "${name}" (see mail_directory)`);
     if (agent.id === caller.id) throw new UserError("you cannot send mail to yourself");
-    return [{ agentId: agent.id, registration, agent }];
+    return [{ kind: "local", agentId: agent.id, registration, agent }];
   }
 
   /** The last host directory snapshot; before the first successful refresh, an empty one. */
   hosts(): HostBook {
-    throw new Error("not implemented");
+    return this.hostBook;
   }
 
   /** Re-reads the host directory; keeps the previous snapshot when the read throws. */
-  refreshHosts(): Promise<HostBook> {
-    return Promise.reject(new Error("not implemented"));
+  async refreshHosts(): Promise<HostBook> {
+    try {
+      this.hostBook = new HostBook(await this.paseo.hostDirectory());
+    } catch (error) {
+      console.error("[paseo-mail] reading the host directory failed:", (error as Error).message);
+    }
+    return this.hostBook;
   }
 
   // ---------------------------------------------------------------- mail
@@ -169,11 +204,17 @@ export class Mailer {
     if (to.length === 0) throw new UserError("give at least one address");
     // Resolve everything first, so a bad address sends nothing.
     const targets = new Map<string, { address: string; registration: Registration | null; agent: AgentInfo }>();
+    const remotes = new Set<string>();
     for (const address of to) {
       for (const target of await this.resolve(caller, address)) {
+        if (target.kind === "remote") {
+          remotes.add(`${target.serverId}/${target.agentId ?? `name:${target.name}`}`);
+          continue;
+        }
         if (!targets.has(target.agentId)) targets.set(target.agentId, { address: address.trim(), registration: target.registration, agent: target.agent });
       }
     }
+    if (remotes.size > 0) throw new UserError("cross-host delivery is not available yet");
     return this.deliver(caller, [...targets.values()], subject, body, thread);
   }
 
@@ -270,6 +311,7 @@ export class Mailer {
   /** After a (re)start: nudge agents holding mail they were not nudged about, then publish every registry entry. */
   async start(): Promise<void> {
     for (const agentId of this.store.pendingNudges()) this.schedule(agentId);
+    await this.refreshHosts();
     // Re-read each entry just before publishing: an agent may rename or clear itself while earlier publishes are in flight.
     for (const { agentId } of this.registry.list()) {
       const current = this.registry.get(agentId);

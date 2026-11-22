@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import type { HostBook } from "./address";
 import { Queue } from "./files";
 import { normalize, type Registry } from "./registry";
 import { isLocal, type MailStore } from "./store";
@@ -22,6 +23,11 @@ export interface Delivery {
   title: string | null;
   mailId: string;
 }
+
+/** One recipient an address reaches: a live local agent, or an agent (resolved or not yet) on a linked host. */
+export type ResolvedTarget =
+  | { kind: "local"; agentId: string; registration: Registration | null; agent: AgentInfo }
+  | { kind: "remote"; serverId: string; agentId: string | null; name: string | null; title: string | null };
 
 const ROLE_PREFIX = "role:";
 const AGENT_PREFIX = "agent:";
@@ -145,6 +151,16 @@ export class Mailer {
     if (!registration || !agent) throw new UserError(`no live agent is registered as "${name}" (see mail_directory)`);
     if (agent.id === caller.id) throw new UserError("you cannot send mail to yourself");
     return [{ agentId: agent.id, registration, agent }];
+  }
+
+  /** The last host directory snapshot; before the first successful refresh, an empty one. */
+  hosts(): HostBook {
+    throw new Error("not implemented");
+  }
+
+  /** Re-reads the host directory; keeps the previous snapshot when the read throws. */
+  refreshHosts(): Promise<HostBook> {
+    return Promise.reject(new Error("not implemented"));
   }
 
   // ---------------------------------------------------------------- mail

@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { setup, type FakePaseo } from "../test/fixtures";
+import { FakeNetwork, setup, setupPair, type FakePaseo } from "../test/fixtures";
+import { HostBook } from "./address";
 import { nudgeText, type Mailer } from "./mailer";
-import type { Mail } from "./types";
+import { UserError, type Mail } from "./types";
 
 let current: Mailer | null = null;
 afterEach(async () => {
@@ -576,5 +577,172 @@ describe("publishing paseo-mail.address (design step 4)", () => {
     const env = await setup({ debounceMs: 60_000 });
     await env.mailer.dispose();
     expect(env.paseo.calls.map((call) => call.op)).toEqual(["release"]);
+  });
+});
+
+describe("remote addresses (design steps 5 and 6, resolution half)", () => {
+  const CANTOR = "srv_Cantor01";
+  const MAC = "srv_EntwLoR9srmD";
+  const ADDRESS_KEY = "paseo-mail.address";
+  const mailers: Mailer[] = [];
+  afterEach(async () => {
+    await Promise.all(mailers.splice(0).map((mailer) => mailer.dispose()));
+  });
+
+  /** cantor and the Mac (cantor lists it as "m2-max"), with "lead" registered on cantor. */
+  async function linked() {
+    const pair = await setupPair({ debounceMs: 60_000 });
+    mailers.push(pair.cantor.mailer, pair.mac.mailer);
+    const lead = pair.cantor.paseo.add("lead-id", { title: "Lead" });
+    await pair.cantor.mailer.register(lead, { name: "lead" });
+    return { ...pair, lead };
+  }
+
+  /** The peerAddresses calls cantor's port recorded, as [serverId]. */
+  function listings(paseo: FakePaseo): unknown[][] {
+    return paseo.calls.filter((call) => call.op === "peerAddresses").map((call) => call.args);
+  }
+
+  const unresolved = (serverId: string, name: string) => ({ kind: "remote", serverId, agentId: null, name, title: null });
+
+  // "other" publishes first. Wrong: taking the first publisher regardless of name (other-id); the
+  // name as typed ("Probe"); the link label ("m2-max") or the caller's title in place of the serverId
+  // or the recipient's title.
+  it("resolves name@label to the one Mac agent publishing that name", async () => {
+    const { cantor, mac, lead } = await linked();
+    await mac.mailer.register(mac.paseo.add("other-id", { title: "Other" }), { name: "other" });
+    await mac.mailer.register(mac.paseo.add("probe-id", { title: "Probe" }), { name: "probe" });
+    expect(await cantor.mailer.resolve(lead, "Probe@m2-max")).toEqual([{ kind: "remote", serverId: MAC, agentId: "probe-id", name: "probe", title: "Probe" }]);
+  });
+
+  // Today's code also throws a UserError here, but from normalize ("invalid name"), before any
+  // listing. Wrong: accepting the mail unresolved when nobody publishes the name.
+  it("refuses a name nobody on the online host publishes", async () => {
+    const { cantor, mac, lead } = await linked();
+    await mac.mailer.register(mac.paseo.add("other-id", { title: "Other" }), { name: "other" });
+    const error = await cantor.mailer.resolve(lead, "probe@m2-max").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(UserError);
+    expect((error as Error).message).not.toMatch(/invalid name/);
+    expect(listings(cantor.paseo)).toContainEqual([MAC]);
+    // Positive control: once probe publishes the name, the same address resolves.
+    await mac.mailer.register(mac.paseo.add("probe-id", { title: "Probe" }), { name: "probe" });
+    expect(await cantor.mailer.resolve(lead, "probe@m2-max")).toMatchObject([{ kind: "remote", agentId: "probe-id" }]);
+  });
+
+  // Two publishers of "probe", both untitled, so the message has to carry their ids. Written as
+  // metadata because the Mac's registry refuses a second holder. Wrong: the first publisher wins;
+  // an error that does not say who holds the name.
+  it("refuses a name two agents on the host publish, naming both", async () => {
+    const { cantor, mac, lead } = await linked();
+    for (const id of ["p-one-id", "p-two-id"]) {
+      mac.paseo.add(id);
+      mac.paseo.setMetadata(id, { [ADDRESS_KEY]: { name: "probe", roles: [] } });
+    }
+    const error = await cantor.mailer.resolve(lead, "probe@m2-max").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(UserError);
+    expect((error as Error).message).toContain("p-one-id");
+    expect((error as Error).message).toContain("p-two-id");
+  });
+
+  // Wrong: refusing mail to a host that is not online; the name as typed ("Probe").
+  it("accepts name@host unresolved when the host is not online", async () => {
+    const { network, cantor, mac, lead } = await linked();
+    await mac.mailer.register(mac.paseo.add("probe-id", { title: "Probe" }), { name: "probe" });
+    network.setReachable(CANTOR, MAC, false);
+    expect(await cantor.mailer.resolve(lead, "Probe@m2-max")).toEqual([unresolved(MAC, "probe")]);
+  });
+
+  // The Mac reads online, but its listing throws. Wrong: folding the throw into "nobody publishes
+  // the name" (an error); letting the throw escape.
+  it("accepts name@host unresolved when the online host's listing throws", async () => {
+    const { network, cantor, mac, lead } = await linked();
+    await mac.mailer.register(mac.paseo.add("probe-id", { title: "Probe" }), { name: "probe" });
+    network.fault(MAC, "peerAddresses", true);
+    expect((await cantor.paseo.hostDirectory()).hosts).toContainEqual(expect.objectContaining({ serverId: MAC, online: true }));
+    expect(await cantor.mailer.resolve(lead, "Probe@m2-max")).toEqual([unresolved(MAC, "probe")]);
+    // Positive control: with the listing back, the same address resolves to probe.
+    network.fault(MAC, "peerAddresses", false);
+    expect(await cantor.mailer.resolve(lead, "Probe@m2-max")).toMatchObject([{ kind: "remote", agentId: "probe-id" }]);
+  });
+
+  // Wrong: treating every host part as remote (cantor does not list itself, so "cantor" would be
+  // unknown); a local target without its kind.
+  it("resolves the own label or serverId, and a plain name, to a local target", async () => {
+    const { cantor, lead } = await linked();
+    await cantor.mailer.register(cantor.paseo.add("bob-id", { title: "Bob" }), { name: "bob" });
+    expect(await cantor.mailer.resolve(lead, "Bob@cantor")).toMatchObject([{ kind: "local", agentId: "bob-id" }]);
+    expect(await cantor.mailer.resolve(lead, "bob@srv_Cantor01")).toMatchObject([{ kind: "local", agentId: "bob-id" }]);
+    expect(await cantor.mailer.resolve(lead, "bob")).toMatchObject([{ kind: "local", agentId: "bob-id" }]);
+  });
+
+  // probe holds the role "qa" and is reachable by id. Wrong: resolving role:qa@host or
+  // agent:<id>@host on the remote host (or locally) instead of refusing them.
+  it("refuses role:x@host as planned and agent:x@host as unsupported", async () => {
+    const { cantor, mac, lead } = await linked();
+    await mac.mailer.register(mac.paseo.add("probe-id", { title: "Probe" }), { name: "probe", roles: ["qa"] });
+    await expect(cantor.mailer.resolve(lead, "role:qa@m2-max")).rejects.toBeInstanceOf(UserError);
+    await expect(cantor.mailer.resolve(lead, "role:qa@m2-max")).rejects.toThrow(/planned/);
+    await expect(cantor.mailer.resolve(lead, "agent:probe-id@m2-max")).rejects.toBeInstanceOf(UserError);
+    await expect(cantor.mailer.resolve(lead, "agent:probe-id@m2-max")).rejects.toThrow(/unsupported|not supported/);
+  });
+
+  // The local recipient comes first. Wrong: storing each copy as its target resolves (bob's copy
+  // lands before the remote one throws); storing the remote copy.
+  it("send refuses any remote target until cross-host delivery lands, and stores nothing", async () => {
+    const { cantor, mac, lead } = await linked();
+    await cantor.mailer.register(cantor.paseo.add("bob-id", { title: "Bob" }), { name: "bob" });
+    await mac.mailer.register(mac.paseo.add("probe-id", { title: "Probe" }), { name: "probe" });
+    const before = cantor.store.revision;
+    await expect(cantor.mailer.send(lead, ["bob", "probe@m2-max"], "s", "b")).rejects.toThrow("cross-host delivery is not available yet");
+    await expect(cantor.mailer.send(lead, ["bob", "probe@m2-max"], "s", "b")).rejects.toBeInstanceOf(UserError);
+    expect(cantor.store.revision).toBe(before);
+    expect(cantor.store.all()).toEqual([]);
+    expect(mac.store.all()).toEqual([]);
+  });
+
+  // Wrong: hosts() undefined or throwing before a refresh; refreshHosts() returning the new book
+  // without keeping it as the snapshot.
+  it("hosts() is an empty book until refreshHosts() reads the directory", async () => {
+    const network = new FakeNetwork();
+    const host = network.host(CANTOR, "cantor");
+    network.host(MAC, "M2 Max");
+    network.link(CANTOR, MAC, { label: "m2-max" });
+    const env = await setup({ debounceMs: 60_000 }, undefined, host);
+    mailers.push(env.mailer);
+    expect(env.mailer.hosts()).toBeInstanceOf(HostBook);
+    expect(env.mailer.hosts().display(MAC)).toBe(MAC);
+    expect((await env.mailer.refreshHosts()).display(MAC)).toBe("m2-max");
+    expect(env.mailer.hosts().display(MAC)).toBe("m2-max");
+  });
+
+  // Wrong: start() not refreshing the snapshot (the Mac's display stays its serverId).
+  it("start() refreshes the host snapshot", async () => {
+    const { mac } = await linked();
+    expect(mac.mailer.hosts().display(CANTOR)).toBe("cantor");
+  });
+
+  // Wrong: replacing the snapshot with an empty book when the read throws; a refreshHosts() that
+  // never reads the directory (the read count shows it did).
+  it("refreshHosts() keeps the previous snapshot when the directory read throws", async () => {
+    const { cantor } = await linked();
+    expect(cantor.mailer.hosts().display(MAC)).toBe("m2-max");
+    let reads = 0;
+    cantor.paseo.hostDirectory = async () => {
+      reads += 1;
+      throw new Error("directory down");
+    };
+    await cantor.mailer.refreshHosts().catch(() => undefined);
+    expect(reads).toBeGreaterThan(0);
+    expect(cantor.mailer.hosts().display(MAC)).toBe("m2-max");
+  });
+
+  // The attic is linked after start() and unreachable, so only a fresh read knows it. Wrong:
+  // resolving against the snapshot start() took ("attic" is then an unknown host).
+  it("resolve refreshes the host snapshot for a remote address", async () => {
+    const { network, cantor, lead } = await linked();
+    network.host("srv_Attic01", "attic");
+    network.link(CANTOR, "srv_Attic01", { label: "attic" });
+    network.setReachable(CANTOR, "srv_Attic01", false);
+    expect(await cantor.mailer.resolve(lead, "probe@attic")).toEqual([unresolved("srv_Attic01", "probe")]);
   });
 });

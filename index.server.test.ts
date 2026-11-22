@@ -117,8 +117,9 @@ describe("contribute", () => {
 
   // Task 6 of paseo-mail#xsbz (design step 8): every turn end runs an import pass, whether the hook
   // calls importDrops itself or through the Mailer method it calls. The baseline is taken once start()
-  // has settled, since start() imports too. Wrong: turn.after only scheduling a nudge.
-  it("runs an import pass after each turn", async () => {
+  // has settled, since start() imports too. The import then never settles. Wrong: turn.after only
+  // scheduling a nudge; the hook awaiting the import (it hangs with it).
+  it("runs an import pass after each turn, without waiting for it", async () => {
     const start = vi.spyOn(Mailer.prototype, "start");
     const importDrops = vi.spyOn(Mailer.prototype, "importDrops").mockResolvedValue(undefined);
     try {
@@ -130,7 +131,9 @@ describe("contribute", () => {
       await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
       await start.mock.results[0]!.value;
       const before = importDrops.mock.calls.length;
-      await hooks.get("agent.turn.after")!({ agent: { id: "b" }, turnId: null, outcome: { kind: "completed" }, timeline: [] }, context);
+      importDrops.mockReturnValue(new Promise<void>(() => undefined));
+      const after = hooks.get("agent.turn.after")!({ agent: { id: "b" }, turnId: null, outcome: { kind: "completed" }, timeline: [] }, context);
+      expect(await Promise.race([after.then(() => "resolved"), new Promise((resolve) => setTimeout(() => resolve("pending"), 500))])).toBe("resolved");
       await vi.waitFor(() => expect(importDrops.mock.calls.length).toBeGreaterThan(before));
       await cleanup();
     } finally {

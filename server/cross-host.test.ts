@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FakeNetwork, setup, setupPair, type FakePaseo } from "../test/fixtures";
+import { FakeNetwork, setup, setupPair, type Env, type FakePaseo } from "../test/fixtures";
 import type { Mailer, MailerOptions } from "./mailer";
 import type { HostEntry, Mail } from "./types";
 
@@ -8,6 +8,7 @@ import type { HostEntry, Mail } from "./types";
 
 const CANTOR = "srv_Cantor01";
 const MAC = "srv_EntwLoR9srmD";
+const ATTIC = "srv_Attic01";
 const DROP_PREFIX = "paseo-mail.in.";
 /** The named idle nudge for one mail, written out here rather than read from nudgeText(). */
 const NUDGE_ONE = "[paseo-mail] You have 1 unread mail. Call mail_list to see them.";
@@ -140,10 +141,11 @@ describe("importDrops: accept (design step 8)", () => {
 
   // A reply's address has no host part, or keeps "agent:<id>" before the "@". Ids are case-sensitive.
   // Wrong: parseAddress().local ("Anon-ID": the prefix lost); lower-casing ("agent:anon-id"); the
-  // address untrimmed or with its host part.
+  // address untrimmed or with its host part; splitting on the last "@" ("Probe@M2-Max").
   it.each([
     { typed: "agent:Anon-ID", stored: "agent:Anon-ID" },
     { typed: " agent:Anon-ID@m2-max ", stored: "agent:Anon-ID" },
+    { typed: "Probe@M2-Max@extra", stored: "Probe" },
   ])("rewrites to.address $typed to $stored", async ({ typed, stored }) => {
     const { mac } = await pairOf();
     place(mac.paseo, "probe-id", "m_100", { ...dropped("m_100"), to: { agentId: "probe-id", address: typed, serverId: MAC } });
@@ -151,11 +153,12 @@ describe("importDrops: accept (design step 8)", () => {
     expect(mac.store.get("m_100")?.to).toEqual({ agentId: "probe-id", address: stored, serverId: null });
   });
 
-  // Wrong: storing without scheduling a nudge (none is sent). The second, empty pass only shows that
-  // nothing more arrives; the nudgedAt stamp would hold back a repeat anyway.
+  // The value's to.agentId ("old-id") is not the holder. Wrong: storing without scheduling a nudge;
+  // scheduling it for the value's to.agentId (none is sent to probe-id). The second, empty pass only
+  // shows that nothing more arrives; the nudgedAt stamp would hold back a repeat anyway.
   it("nudges the recipient exactly once", async () => {
     const { mac } = await pairOf({ debounceMs: 5 });
-    place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
+    place(mac.paseo, "probe-id", "m_100", { ...dropped("m_100"), to: { agentId: "old-id", address: "probe@m2-max", serverId: MAC } });
     await mac.mailer.importDrops();
     expect(await until(() => mac.paseo.sent.length > 0)).toBe(true);
     await mac.mailer.importDrops();
@@ -165,6 +168,19 @@ describe("importDrops: accept (design step 8)", () => {
 
   // The fake lists drops on every agent, so the background case is a smoke check (the include
   // flags are Task 3's adapter tests). Wrong: skipping a holder a live lookup reports archived.
+  // Wrong: storing the mail but scheduling its nudge only after the clear, so a clear that throws
+  // leaves it un-nudged until something else schedules one.
+  it("nudges a stored mail even when clearing its drop throws", async () => {
+    const { mac } = await pairOf({ debounceMs: 5 });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mac.paseo.clearDrop = () => Promise.reject(new Error("clear failed"));
+    place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
+    await mac.mailer.importDrops().catch(() => undefined);
+    expect(mac.store.get("m_100")?.to.agentId).toBe("probe-id");
+    expect(await until(() => mac.paseo.sent.length > 0)).toBe(true);
+    expect(mac.paseo.sent).toEqual([{ agentId: "probe-id", text: NUDGE_ONE }]);
+  });
+
   it("imports a drop held by an archived local agent and one held by a background agent", async () => {
     const { mac } = await pairOf();
     mac.paseo.add("arch-id");
@@ -219,6 +235,27 @@ describe("importDrops: clear without storing (design step 8)", () => {
     expect(hasDrop(mac.paseo, "probe-id", "m_ghost")).toBe(false);
     expect(mac.store.get("m_old")?.from).toEqual({ agentId: "old-id", name: "old", title: null, serverId: CANTOR });
     expect(hasDrop(mac.paseo, "probe-id", "m_old")).toBe(false);
+  });
+
+  // A drop with no sender agent can never be checked. Wrong: parking it (the key stays for ever).
+  it("clears a drop whose from.agentId is null", async () => {
+    const { mac } = await pairOf();
+    place(mac.paseo, "probe-id", "m_100", { ...dropped("m_100"), from: { agentId: null, name: "paseo-mail", title: null, serverId: CANTOR } });
+    await mac.mailer.importDrops();
+    expect(clears(mac.paseo)).toEqual([["probe-id", "m_100"]]);
+    expect(mac.store.all()).toEqual([]);
+  });
+
+  // The holder is archived and the sender missing on cantor. Wrong: an archived holder skipping the
+  // sender check (stored).
+  it("clears a drop on an archived holder whose sender does not exist on its host", async () => {
+    const { mac } = await pairOf();
+    mac.paseo.add("arch-id");
+    mac.paseo.archive("arch-id");
+    place(mac.paseo, "arch-id", "m_ghost", { ...dropped("m_ghost"), from: { agentId: "ghost-id", name: "ghost", title: null, serverId: CANTOR } });
+    await mac.mailer.importDrops();
+    expect(clears(mac.paseo)).toEqual([["arch-id", "m_ghost"]]);
+    expect(mac.store.all()).toEqual([]);
   });
 });
 
@@ -275,19 +312,64 @@ describe("importDrops: park (design step 8)", () => {
     expect(hasDrop(mac.paseo, "probe-id", "m_100")).toBe(false);
     expect(hasDrop(mac.paseo, "probe-id", "m_bad")).toBe(false);
   });
+
+  // Two drops on one agent: m_001 (placed first, so listed first) waits or fails, m_002 from cantor
+  // is fine. m_001 comes from a third host, the attic, except in the create row. Wrong: the first
+  // parked or failed drop ending the pass (m_002 not stored).
+  const firstStuck: { why: string; arrange: (env: { network: FakeNetwork; mac: Env }) => string }[] = [
+    {
+      why: "its sender's host is offline",
+      arrange: ({ network }) => {
+        network.setReachable(MAC, ATTIC, false);
+        return ATTIC;
+      },
+    },
+    {
+      why: "its sender lookup throws",
+      arrange: ({ network }) => {
+        network.fault(ATTIC, "peerAgent", true);
+        return ATTIC;
+      },
+    },
+    {
+      why: "its create throws",
+      arrange: ({ mac }) => {
+        const create = mac.store.create.bind(mac.store);
+        mac.store.create = (mail) => (mail.id === "m_001" ? Promise.reject(new Error("disk full")) : create(mail));
+        return CANTOR;
+      },
+    },
+  ];
+  it.each(firstStuck)("a drop that stays because $why does not hold back the next one", async ({ arrange }) => {
+    const { network, mac } = await pairOf();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    network.host(ATTIC, "attic").add("keeper-id");
+    network.link(MAC, ATTIC, { label: "attic" });
+    const sender = arrange({ network, mac });
+    const from = sender === ATTIC ? { agentId: "keeper-id", name: "keeper", title: null, serverId: ATTIC } : dropped("m_001").from;
+    place(mac.paseo, "probe-id", "m_001", { ...dropped("m_001"), from });
+    place(mac.paseo, "probe-id", "m_002", dropped("m_002"));
+    await mac.mailer.importDrops().catch(() => undefined);
+    expect(hasDrop(mac.paseo, "probe-id", "m_001")).toBe(true);
+    expect(mac.store.get("m_001")).toBeUndefined();
+    expect(mac.store.get("m_002")?.to.agentId).toBe("probe-id");
+    expect(hasDrop(mac.paseo, "probe-id", "m_002")).toBe(false);
+  });
 });
 
 describe("importDrops: duplicate vs failure (design step 8)", () => {
   // The same drop arrives twice; probe read the first copy in between. Wrong: no store.get check
   // (create throws "already exists", so the second drop parks for ever); overwriting the stored mail
-  // (readAt back to null); storing a second copy.
+  // (readAt back to null); storing a second copy. The value's to.agentId ("old-id") is not the
+  // holder. Wrong: clearing the duplicate on the value's to.agentId (probe-id's key stays).
   it("clears a duplicate drop and stores one mail", async () => {
     const { mac } = await pairOf();
-    place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
+    const value = { ...dropped("m_100"), to: { agentId: "old-id", address: "probe@m2-max", serverId: MAC } };
+    place(mac.paseo, "probe-id", "m_100", value);
     await mac.mailer.importDrops();
     const read = await mac.mailer.read("probe-id", "m_100");
     expect(read.readAt).not.toBeNull();
-    place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
+    place(mac.paseo, "probe-id", "m_100", value);
     await mac.mailer.importDrops();
     expect(hasDrop(mac.paseo, "probe-id", "m_100")).toBe(false);
     expect(clears(mac.paseo)).toEqual([
@@ -316,6 +398,93 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     expect(mac.store.get("m_100")?.to.agentId).toBe("probe-id");
     expect(hasDrop(mac.paseo, "probe-id", "m_100")).toBe(false);
   });
+
+  // The drop's key says m_key; its value is mail m_100, already stored. Wrong: the duplicate check
+  // on the key's id (create("m_100") throws and the drop parks); clearing by the value's id.
+  it("checks a duplicate by the value's id and clears the drop by its key", async () => {
+    const { mac } = await pairOf();
+    place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
+    await mac.mailer.importDrops();
+    place(mac.paseo, "probe-id", "m_key", dropped("m_100"));
+    await mac.mailer.importDrops();
+    expect(clears(mac.paseo)).toEqual([
+      ["probe-id", "m_100"],
+      ["probe-id", "m_key"],
+    ]);
+    expect(hasDrop(mac.paseo, "probe-id", "m_key")).toBe(false);
+    expect(mac.store.all().map((mail) => mail.id)).toEqual(["m_100"]);
+  });
+
+  // A known mail from a host now offline still waits like any other drop from it. Wrong: the
+  // duplicate check before the park checks (cleared). Positive control: online again, it is cleared.
+  it("parks a duplicate drop while its sender's host is offline", async () => {
+    const { network, mac } = await pairOf();
+    place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
+    await mac.mailer.importDrops();
+    place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
+    network.setReachable(MAC, CANTOR, false);
+    await mac.mailer.importDrops().catch(() => undefined);
+    expect(hasDrop(mac.paseo, "probe-id", "m_100")).toBe(true);
+    expect(clears(mac.paseo)).toHaveLength(1);
+    network.setReachable(MAC, CANTOR, true);
+    await mac.mailer.importDrops();
+    expect(hasDrop(mac.paseo, "probe-id", "m_100")).toBe(false);
+    expect(mac.store.all()).toHaveLength(1);
+  });
+
+  // Two passes started together on one drop. Wrong: passes not serialized (both list the drop and
+  // look up its sender; the second create throws "already exists").
+  it("serializes passes: two concurrent imports handle a drop once", async () => {
+    const { mac } = await pairOf();
+    place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
+    const mark = mac.paseo.calls.length;
+    await Promise.all([mac.mailer.importDrops(), mac.mailer.importDrops()]);
+    const calls = mac.paseo.calls.slice(mark);
+    expect(calls.filter((call) => call.op === "peerAgent")).toHaveLength(1);
+    expect(calls.filter((call) => call.op === "clearDrop")).toHaveLength(1);
+    expect(mac.store.all().map((mail) => mail.id)).toEqual(["m_100"]);
+  });
+
+  // Wrong: a pass that swallows a localDrops() throw (resolves as if there were no drops).
+  it("rejects when listing the local drops throws", async () => {
+    const { mac } = await pairOf();
+    mac.paseo.localDrops = () => Promise.reject(new Error("list down"));
+    await expect(mac.mailer.importDrops()).rejects.toThrow("list down");
+  });
+
+  // Pass 1 parks after listing m_001; m_002 lands and a second pass is queued; dispose() runs before
+  // pass 1 goes on. m_002 comes from lead2-id, so a queued pass that ran anyway shows as a lookup of
+  // lead2-id or a clear of m_002. Wrong: a pass that does not check for dispose() when it starts.
+  // Positive control: the same sequence without dispose() handles m_002.
+  it.each([true, false])("a pass queued before dispose() makes no peer call or clear once dispose() has run (disposed: %s)", async (disposing) => {
+    const { cantor, mac } = await pairOf();
+    cantor.paseo.add("lead2-id");
+    place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let parked = false;
+    const list = mac.paseo.localDrops.bind(mac.paseo);
+    mac.paseo.localDrops = async () => {
+      const drops = await list();
+      if (!parked) {
+        parked = true;
+        await hold;
+      }
+      return drops;
+    };
+    const first = mac.mailer.importDrops().catch(() => undefined);
+    expect(await until(() => parked)).toBe(true);
+    place(mac.paseo, "probe-id", "m_002", { ...dropped("m_002"), from: { agentId: "lead2-id", name: "lead2", title: null, serverId: CANTOR } });
+    const second = mac.mailer.importDrops().catch(() => undefined);
+    const disposed = disposing ? mac.mailer.dispose() : Promise.resolve();
+    release();
+    await Promise.all([first, second, disposed]);
+    const aboutM002 = mac.paseo.calls.filter((call) => (call.op === "peerAgent" && call.args[1] === "lead2-id") || (call.op === "clearDrop" && call.args[1] === "m_002"));
+    if (disposing) expect(aboutM002).toEqual([]);
+    else expect(aboutM002.map((call) => call.op)).toEqual(["peerAgent", "clearDrop"]);
+  });
 });
 
 describe("import triggers (design step 8)", () => {
@@ -326,6 +495,21 @@ describe("import triggers (design step 8)", () => {
     place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
     await mac.mailer.start();
     expect(await until(() => mac.store.get("m_100") !== undefined, 500)).toBe(true);
+  });
+
+  // Each start() step is guarded on its own (plan "Shared constraints"). A mail waits in the Mac's
+  // outbox and listing the drops throws. Wrong: a failed import ending start() before its hand-off.
+  it("start() still hands off the outbox when its import pass fails", async () => {
+    const { mac } = await macUnstarted();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mac.store.create({
+      ...dropped("m_out"),
+      from: { agentId: "probe-id", name: "probe", title: "Probe", serverId: null },
+      to: { agentId: "lead-id", address: "lead@cantor", serverId: CANTOR },
+    });
+    mac.paseo.localDrops = () => Promise.reject(new Error("list down"));
+    await mac.mailer.start();
+    expect(await until(() => mac.store.get("m_out")?.handedOffAt != null, 500)).toBe(true);
   });
 
   // Wrong: dropsChanged left a no-op.

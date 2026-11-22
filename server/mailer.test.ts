@@ -479,10 +479,17 @@ describe("publishing paseo-mail.address (design step 4)", () => {
 
   // Wrong: skipping the nameless (roles-only) entry; publishing names without roles; publishing
   // only the first entry; not awaiting the backfill inside start(). Entries are written straight
-  // to the registry so register's own publishing does not pollute the record.
+  // to the registry so register's own publishing does not pollute the record. The fake records a
+  // publish only after a timer tick, so the record is empty after `await start()` unless start()
+  // waited for the publishes.
   it("start() publishes every registry entry (backfill)", async () => {
     const env = await setup({ debounceMs: 60_000 });
     current = env.mailer;
+    const publishAddress = env.paseo.publishAddress.bind(env.paseo);
+    env.paseo.publishAddress = async (...args) => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return publishAddress(...args);
+    };
     const entries = [
       { agentId: "a-carol", name: "carol", roles: ["ops"] },
       { agentId: "a-dave", name: null, roles: ["qa", "review"] },
@@ -510,5 +517,31 @@ describe("publishing paseo-mail.address (design step 4)", () => {
     expect(entry).toMatchObject({ agentId: "alice-id", name: "alice", roles: ["qa"] });
     expect(registry.get("alice-id")).toMatchObject({ name: "alice", roles: ["qa"] });
     expect(published(paseo)).toEqual([["alice-id", { name: "alice", roles: ["qa"] }]]);
+  });
+
+  // Wrong: start() publishing without the per-entry catch (start() rejects on the first failure),
+  // or one catch around the whole loop (start() resolves after one attempt instead of three).
+  it("a publishAddress failure does not fail start(), and every entry is still attempted", async () => {
+    const env = await setup({ debounceMs: 60_000 });
+    current = env.mailer;
+    const entries = [
+      { agentId: "a-carol", name: "carol", roles: ["ops"] },
+      { agentId: "a-dave", name: null, roles: ["qa"] },
+      { agentId: "a-erin", name: "erin", roles: [] },
+    ];
+    for (const entry of entries) {
+      env.paseo.add(entry.agentId);
+      await env.registry.set({ ...entry, workspaceId: null, projectId: null, updatedAt: "2026-11-22T10:00:00.000Z" });
+    }
+    env.paseo.failPublish = true;
+    await expect(env.mailer.start()).resolves.toBeUndefined();
+    expect(published(env.paseo).map(([agentId]) => agentId).sort()).toEqual(["a-carol", "a-dave", "a-erin"]);
+  });
+
+  // Wrong: dispose() closing the store and registry but not releasing the port.
+  it("dispose() releases the port", async () => {
+    const env = await setup({ debounceMs: 60_000 });
+    await env.mailer.dispose();
+    expect(env.paseo.calls.map((call) => call.op)).toEqual(["release"]);
   });
 });

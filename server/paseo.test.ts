@@ -300,6 +300,26 @@ describe("PaseoAdapter.peerAgent", () => {
     local.clientFailure.set("srv_Peer9", new Error("host offline"));
     await expect(adapter.peerAgent("srv_Peer9", "a-remote")).rejects.toThrow("host offline");
   });
+
+  // Wrong: caching the rejected client promise (the second call rejects "host offline" without
+  // asking hosts.client again).
+  it("does not keep a failed hosts.client: the next call connects again", async () => {
+    const { local, adapter } = pair([{ id: "a-remote", title: "Remote" }]);
+    local.clientFailure.set("srv_Peer9", new Error("host offline"));
+    await expect(adapter.peerAgent("srv_Peer9", "a-remote")).rejects.toThrow("host offline");
+    local.clientFailure.delete("srv_Peer9");
+    await expect(adapter.peerAgent("srv_Peer9", "a-remote")).resolves.toMatchObject({ id: "a-remote", title: "Remote" });
+    expect(local.clientCalls).toEqual(["srv_Peer9", "srv_Peer9"]);
+  });
+
+  // Wrong: no cache (one hosts.client per call, so two here).
+  it("connects to a peer once across calls", async () => {
+    const { local, peer, adapter } = pair([{ id: "a-remote" }]);
+    await adapter.peerAgent("srv_Peer9", "a-remote");
+    await adapter.peerAgent("srv_Peer9", "a-remote");
+    expect(peer.refreshed).toEqual(["a-remote", "a-remote"]);
+    expect(local.clientCalls).toEqual(["srv_Peer9"]);
+  });
 });
 
 describe("PaseoAdapter.peerAddresses", () => {
@@ -327,6 +347,45 @@ describe("PaseoAdapter.peerAddresses", () => {
     expect(await attached(local).peerAddresses("srv_Peer9")).toEqual([{ agentId: "a-bg", name: "worker", roles: [], title: null }]);
     expect(peer.listCalls.length).toBeGreaterThan(0);
     for (const call of peer.listCalls) expect(call.filter?.includeBackground).toBe(true);
+  });
+
+  // Wrong: accepting "" as a name (a-empty comes back with name ""). Positive control: a-named.
+  it("drops a row that publishes an empty name", async () => {
+    const local = stubDaemon("srv_Self1");
+    const peer = stubDaemon("srv_Peer9", [
+      { id: "a-empty", metadata: { "paseo-mail.address": { name: "", roles: ["qa"] } } },
+      { id: "a-named", metadata: { "paseo-mail.address": { name: "named", roles: ["qa"] } } },
+    ]);
+    local.peers.set("srv_Peer9", peer);
+    expect(await attached(local).peerAddresses("srv_Peer9")).toEqual([{ agentId: "a-named", name: "named", roles: ["qa"], title: null }]);
+  });
+
+  // Wrong: passing roles through unfiltered (["qa", 7]); dropping the whole row for one bad role.
+  it("keeps only the string roles", async () => {
+    const local = stubDaemon("srv_Self1");
+    const peer = stubDaemon("srv_Peer9", [{ id: "a-mixed", metadata: { "paseo-mail.address": { name: "mixed", roles: ["qa", 7] } } }]);
+    local.peers.set("srv_Peer9", peer);
+    expect(await attached(local).peerAddresses("srv_Peer9")).toEqual([{ agentId: "a-mixed", name: "mixed", roles: ["qa"], title: null }]);
+  });
+});
+
+describe("PaseoAdapter paging", () => {
+  // Wrong: a page limit above the protocol's maximum (the daemon rejects fetch_agents with
+  // page.limit > 200, @getpaseo/protocol messages.js); no page limit at all.
+  it("asks for at most 200 agents per page", async () => {
+    const local = stubDaemon("srv_Self1", [{ id: "a-1" }, { id: "a-2" }, { id: "a-3" }]);
+    const peer = stubDaemon("srv_Peer9", [{ id: "a-4" }, { id: "a-5" }, { id: "a-6" }]);
+    local.peers.set("srv_Peer9", peer);
+    const adapter = attached(local);
+    await adapter.localDrops();
+    await adapter.peerAddresses("srv_Peer9");
+    const limits = [...local.listCalls, ...peer.listCalls].map((call) => call.page?.limit);
+    expect(limits.length).toBeGreaterThanOrEqual(4);
+    for (const limit of limits) {
+      expect(typeof limit).toBe("number");
+      expect(limit).toBeGreaterThan(0);
+      expect(limit).toBeLessThanOrEqual(200);
+    }
   });
 });
 
@@ -361,6 +420,12 @@ describe("PaseoAdapter.localDrops", () => {
       expect(call.filter?.includeBackground).toBe(true);
     }
   });
+
+  // Wrong: keeping a cleared (null) drop key. Positive control: the live drop on the same agent.
+  it("skips a drop key whose value is null", async () => {
+    const local = stubDaemon("srv_Self1", [{ id: "a-1", metadata: { "paseo-mail.in.m_x": null, "paseo-mail.in.m_y": { n: 1 } } }]);
+    expect(await attached(local).localDrops()).toEqual([{ agentId: "a-1", mailId: "m_y", value: { n: 1 } }]);
+  });
 });
 
 describe("PaseoAdapter.watch", () => {
@@ -394,6 +459,36 @@ describe("PaseoAdapter.watch", () => {
     expect(w.hostOnline.mock.calls).toEqual([["srv_Peer9"], ["srv_Peer9"]]);
   });
 
+  // Wrong: the observe snapshot notifies (a host already online at watch time calls hostOnline).
+  // Positive control: a later offline-then-online change does.
+  it("does not call hostOnline for a host already online in the snapshot", async () => {
+    const local = stubDaemon("srv_Self1");
+    const offline = { self: { serverId: "srv_Self1", label: "cantor" }, hosts: [hostEntry("srv_Peer9", "m2-max", "offline")] };
+    const online = { self: { serverId: "srv_Self1", label: "cantor" }, hosts: [hostEntry("srv_Peer9", "m2-max", "online")] };
+    local.setDirectory(online);
+    const w = watcher();
+    attached(local).watch(w.value);
+    await settle();
+    expect(w.hostOnline).not.toHaveBeenCalled();
+    local.emitHosts(offline);
+    local.emitHosts(online);
+    await settle();
+    expect(w.hostOnline.mock.calls).toEqual([["srv_Peer9"]]);
+  });
+
+  // Wrong: reading payload.agent on every agent_update (a remove carries only agentId, so it
+  // throws). Positive control: an upsert with a drop key afterwards still calls dropsChanged.
+  it("ignores an agent remove update", async () => {
+    const local = stubDaemon("srv_Self1", [{ id: "a-1" }]);
+    const w = watcher();
+    attached(local).watch(w.value);
+    await settle();
+    expect(() => local.emitAgentUpdate({ kind: "remove", agentId: "a-1" })).not.toThrow();
+    expect(w.dropsChanged).not.toHaveBeenCalled();
+    local.emitAgentUpdate({ kind: "upsert", agent: snapshotOf({ id: "a-1", metadata: { "paseo-mail.in.m_5": { subject: "x" } } }) });
+    expect(w.dropsChanged).toHaveBeenCalledTimes(1);
+  });
+
   // Wrong: dropsChanged on every agent update, or on any "paseo-mail." key (the negative case
   // carries only paseo-mail.address). Positive control: the same agent with a drop key.
   it("calls dropsChanged on an agent update carrying a paseo-mail.in.* key, and not on one without", async () => {
@@ -425,5 +520,37 @@ describe("PaseoAdapter.release", () => {
     await adapter.peerAddresses("srv_Peer7");
     await adapter.release();
     expect({ ...local.released(), peerA: peerA.dispose.mock.calls.length, peerB: peerB.dispose.mock.calls.length }).toEqual({ hosts: 1, agents: 1, peerA: 1, peerB: 1 });
+  });
+
+  // Wrong: a subscription that settles after release() is kept, not released. Only the agent-list
+  // subscription takes that path: hosts.observe() is kept synchronously inside watch(), before
+  // release() runs, so release() itself releases it either way.
+  it("releases a subscription that settles after release()", async () => {
+    const local = stubDaemon("srv_Self1");
+    const adapter = attached(local);
+    adapter.watch(watcher().value);
+    await adapter.release();
+    await settle();
+    expect(local.released()).toEqual({ hosts: 1, agents: 1 });
+  });
+
+  // Wrong: Promise.all instead of allSettled (release() rejects when one dispose does).
+  it("resolves and disposes the other peer when one peer's dispose rejects", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const local = stubDaemon("srv_Self1");
+      const peerA = stubDaemon("srv_Peer9", [{ id: "a-remote" }]);
+      const peerB = stubDaemon("srv_Peer7", [{ id: "a-other" }]);
+      local.peers.set("srv_Peer9", peerA);
+      local.peers.set("srv_Peer7", peerB);
+      peerA.dispose.mockRejectedValueOnce(new Error("socket closed"));
+      const adapter = attached(local);
+      await adapter.peerAgent("srv_Peer9", "a-remote");
+      await adapter.peerAgent("srv_Peer7", "a-other");
+      await expect(adapter.release()).resolves.toBeUndefined();
+      expect({ peerA: peerA.dispose.mock.calls.length, peerB: peerB.dispose.mock.calls.length }).toEqual({ peerA: 1, peerB: 1 });
+    } finally {
+      error.mockRestore();
+    }
   });
 });

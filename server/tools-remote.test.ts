@@ -224,6 +224,9 @@ describe("mail_send and mail_reply: the result lines (design step 10)", () => {
     const replied = await call("mail_reply", { id: "m_0003", body: "Answer" });
     expect(replied.isError).toBeUndefined();
     expect(replied.text).toMatch(/^Replied: m_\w+ → probe@m2-max — use "probe@m2-max" from now on\n\nUnread: 1$/);
+    // Wrong: sent[].to the bare name "probe", which resolves on cantor.
+    const sent = (replied.structuredContent as { sent: { to: string | null; via: string }[] }).sent;
+    expect(sent.map(({ to, via }) => ({ to, via }))).toEqual([{ to: "probe@m2-max", via: "probe" }]);
   });
 
   // A nameless remote sender (live on the Mac, so the reply is accepted). Its address agent:<id>@host
@@ -238,6 +241,9 @@ describe("mail_send and mail_reply: the result lines (design step 10)", () => {
     expect(replied.text).toMatch(/^Replied: m_\w+ → agent:Anon-ID@m2-max\n\nUnread: 1$/);
     expect(replied.text).not.toContain('use "');
     expect(replied.text).not.toMatch(/null|undefined/);
+    // Wrong: sent[].to the bare name (null here) instead of the shown address.
+    const sent = (replied.structuredContent as { sent: { to: string | null; via: string }[] }).sent;
+    expect(sent.map(({ to, via }) => ({ to, via }))).toEqual([{ to: "agent:Anon-ID@m2-max", via: "agent:Anon-ID" }]);
   });
 });
 
@@ -289,19 +295,70 @@ describe("mail_directory: remote entries (design step 10)", () => {
     expect(remoteOf(await call("mail_directory", {}))).toEqual([PROBE_ENTRY, SCOUT_ENTRY]);
   });
 
-  // The Mac reads online but its listing throws. Wrong: the whole tool failing; the attic or the
-  // local entries dropped with it; no log.
-  it("skips and logs a host whose listing throws, and still returns the rest", async () => {
+  // One host reads online but its listing throws. The Mac is linked first and the attic last, so
+  // faulting each in turn puts the failure before and after the host that answers. Wrong: the whole
+  // tool failing; the local entries dropped; no log; the hosts after a failure dropped (killed by
+  // the Mac case); the hosts before a failure dropped (killed by the attic case).
+  it.each([
+    { faulted: MAC, label: "m2-max", kept: SCOUT_ENTRY },
+    { faulted: ATTIC, label: "attic", kept: PROBE_ENTRY },
+  ])("skips and logs a host whose listing throws ($label), and still returns the rest", async ({ faulted, label, kept }) => {
     const { network, call } = await cantorTools();
-    network.fault(MAC, "peerAddresses", true);
+    network.fault(faulted, "peerAddresses", true);
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const result = await call("mail_directory", {});
     expect(result.isError).toBeUndefined();
     expect(result.text).toContain('\n- lead — "Lead"');
     expect((result.structuredContent as { agents: unknown }).agents).toEqual(LEAD_AGENTS);
-    expect(remoteOf(result)).toEqual([SCOUT_ENTRY]);
+    expect(remoteOf(result)).toEqual([kept]);
     const logs = error.mock.calls.map((args) => args.map(String).join(" "));
-    expect(logs.some((line) => line.startsWith("[paseo-mail]") && (line.includes(MAC) || line.includes("m2-max")))).toBe(true);
+    expect(logs.some((line) => line.startsWith("[paseo-mail]") && (line.includes(faulted) || line.includes(label)))).toBe(true);
+  });
+
+  // Exact text, local only (every peer faulted) and both lists. Wrong: the linked-hosts header
+  // shown with no remote entry; the local header dropped when remote entries follow.
+  it("prints the local section alone, and the linked-hosts section after it", async () => {
+    const { network, call } = await cantorTools();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const both = await call("mail_directory", {});
+    expect(both.text).toBe('Addresses (mail a name, or role:<role>):\n- lead — "Lead"\n\nOn linked hosts (mail name@host):\n- probe@m2-max — "Probe"\n- scout@attic — "Scout"\n\nUnread: 0');
+    network.fault(MAC, "peerAddresses", true);
+    network.fault(ATTIC, "peerAddresses", true);
+    const localOnly = await call("mail_directory", {});
+    expect(localOnly.text).toBe('Addresses (mail a name, or role:<role>):\n- lead — "Lead"\n\nUnread: 0');
+  });
+
+  // No local registration and every peer faulted. Wrong: the empty-directory message dropped (an
+  // empty text); data missing either list.
+  it("says nobody has registered when neither list has an entry", async () => {
+    const { network, call } = await cantorTools({ registerLead: false });
+    network.fault(MAC, "peerAddresses", true);
+    network.fault(ATTIC, "peerAddresses", true);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await call("mail_directory", {});
+    expect(result.text).toBe("No agent has registered a mail name or role yet.\n\nUnread: 0 (you cannot read mail until you register a name with mail_register)");
+    const { agents, remote } = result.structuredContent as { agents: unknown; remote: unknown };
+    expect({ agents, remote }).toEqual({ agents: [], remote: [] });
+  });
+
+  // The attic also publishes "probe". Two hosts can carry the same name, and name@host tells them
+  // apart. Wrong: remote entries deduplicated by name across hosts.
+  it("lists the same name on two hosts as two entries", async () => {
+    const { attic, call } = await cantorTools();
+    publish(attic, "probe2-id", "probe", "Attic Probe");
+    const result = await call("mail_directory", {});
+    expect(remoteOf(result)).toEqual([{ address: "probe@attic", host: "attic", serverId: ATTIC, title: "Attic Probe" }, PROBE_ENTRY, SCOUT_ENTRY]);
+  });
+
+  // A host linked after the mailer started, with no refresh before the call. Wrong: listing from
+  // the hosts() snapshot taken at start (the den is missing).
+  it("reads the host directory fresh: a host linked after start is listed", async () => {
+    const { network, call } = await cantorTools();
+    const den = network.host("srv_Den01", "den");
+    network.link(CANTOR, "srv_Den01", { label: "den" });
+    publish(den, "rook-id", "rook", "Rook");
+    const result = await call("mail_directory", {});
+    expect(remoteOf(result)).toEqual([PROBE_ENTRY, { address: "rook@den", host: "den", serverId: "srv_Den01", title: "Rook" }, SCOUT_ENTRY]);
   });
 
   // Every peer listing throws, then the host directory read throws too. Wrong: the tool failing;

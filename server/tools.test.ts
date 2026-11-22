@@ -93,6 +93,18 @@ describe("tools", () => {
     expect(toId.text).not.toContain("cannot reply to you by alias");
   });
 
+  // a mailed while unregistered, so the reply goes to agent:a; a has registered since. The local
+  // reply line keeps its via, as on main. Wrong: a via shown only for typed addresses (a remote rule).
+  it("keeps the via on a local reply to a sender who has registered since", async () => {
+    const { call } = await tools();
+    await call("mail_register", { name: "bob" }, "b");
+    await call("mail_send", { to: "bob", subject: "Hi", body: "x" }, "a");
+    await call("mail_register", { name: "alice" }, "a");
+    const id = ((await call("mail_list", {}, "b")).structuredContent as { mails: { id: string }[] }).mails[0]!.id;
+    const replied = await call("mail_reply", { id, body: "Done" }, "b");
+    expect(replied.text).toMatch(/^Replied: m_\w+ → alice \(via agent:a\) — use "alice" from now on\n\nUnread: 1$/);
+  });
+
   it("names unregistered senders by title", async () => {
     const { call } = await tools();
     await call("mail_register", { name: "bob" }, "b");

@@ -36,8 +36,35 @@ export type ResolvedTarget =
   | { kind: "local"; agentId: string; registration: Registration | null; agent: AgentInfo }
   | { kind: "remote"; serverId: string; agentId: string | null; name: string | null; title: string | null };
 
+/** A recipient on a linked host, with the address as typed. */
+interface RemoteTarget {
+  address: string;
+  serverId: string;
+  agentId: string | null;
+  name: string | null;
+  title: string | null;
+}
+
 const ROLE_PREFIX = "role:";
 const AGENT_PREFIX = "agent:";
+
+/** Refuses a body over the cross-host cap, measured in UTF-8 bytes. */
+function checkCrossHostBody(body: string): void {
+  const bytes = Buffer.byteLength(body, "utf8");
+  if (bytes > CROSS_HOST_BODY_LIMIT) {
+    throw new UserError(`the body is ${bytes} bytes; mail to an agent on a linked host may have at most ${CROSS_HOST_BODY_LIMIT} bytes (UTF-8)`);
+  }
+}
+
+/** The name an outbox address reaches its recipient by, or null when it has none (`agent:<id>`) or is not a valid name. */
+function nameIn(address: string): string | null {
+  try {
+    const parsed = parseAddress(address);
+    return parsed.kind === "name" ? parsed.local : null;
+  } catch {
+    return null;
+  }
+}
 
 export function nudgeText(count: number, named = true): string {
   const mails = `${count} unread mail${count === 1 ? "" : "s"}`;
@@ -69,12 +96,16 @@ export class Mailer {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Name claims run one at a time, so two agents cannot take the same name. */
   private readonly claims = new Queue();
+  /** Hand-off passes run one at a time, so no drop is written twice. */
+  private readonly handOffs = new Queue();
+  private sweep: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
   /** The last host directory snapshot; empty (own serverId and label empty, so nothing resolves) until the first read. */
   private hostBook = new HostBook({ self: { serverId: "", label: "" }, hosts: [] });
   private readonly debounceMs: number;
   private readonly sendGraceMs: number;
   private readonly maxRetries: number;
+  private readonly sweepMs: number;
   private readonly now: () => string;
 
   constructor(
@@ -86,6 +117,7 @@ export class Mailer {
     this.debounceMs = options.debounceMs ?? 1000;
     this.sendGraceMs = options.sendGraceMs ?? 60_000;
     this.maxRetries = options.maxRetries ?? 5;
+    this.sweepMs = options.sweepMs ?? 60_000;
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -211,18 +243,22 @@ export class Mailer {
     if (to.length === 0) throw new UserError("give at least one address");
     // Resolve everything first, so a bad address sends nothing.
     const targets = new Map<string, { address: string; registration: Registration | null; agent: AgentInfo }>();
-    const remotes = new Set<string>();
+    const remotes = new Map<string, RemoteTarget>();
     for (const address of to) {
       for (const target of await this.resolve(caller, address)) {
         if (target.kind === "remote") {
-          remotes.add(`${target.serverId}/${target.agentId ?? `name:${target.name}`}`);
+          const key = `${target.serverId}/${target.agentId ?? `name:${target.name}`}`;
+          if (!remotes.has(key)) remotes.set(key, { address: address.trim(), serverId: target.serverId, agentId: target.agentId, name: target.name, title: target.title });
           continue;
         }
         if (!targets.has(target.agentId)) targets.set(target.agentId, { address: address.trim(), registration: target.registration, agent: target.agent });
       }
     }
-    if (remotes.size > 0) throw new Error("not implemented");
-    return this.deliver(caller, [...targets.values()], subject, body, thread);
+    // The cap covers every copy of the send, so it is checked before any copy is stored.
+    if (remotes.size > 0) checkCrossHostBody(body);
+    const deliveries = await this.deliver(caller, [...targets.values()], subject, body, thread);
+    if (remotes.size > 0) deliveries.push(...(await this.queueRemote(caller, [...remotes.values()], subject, body, thread)));
+    return deliveries;
   }
 
   list(agentId: string, options: { unreadOnly?: boolean; limit?: number } = {}): Mail[] {
@@ -265,6 +301,16 @@ export class Mailer {
     if (original.from.agentId === null) throw new UserError("this mail came from paseo-mail itself; there is nobody to reply to");
     const subject = /^re:/i.test(original.subject) ? original.subject : `Re: ${original.subject}`;
     const thread = { threadId: original.threadId, inReplyTo: original.id };
+    if (original.from.serverId !== null) {
+      const { serverId, agentId, name, title } = original.from;
+      checkCrossHostBody(body);
+      // The hand-off re-resolves an archived sender by name, so only a nameless one is refused here.
+      if (name === null && (await this.goneOnPeer(serverId, agentId))) {
+        throw new UserError("the sender was archived or no longer exists on its host and had no registered name; the reply cannot be delivered");
+      }
+      const [delivery] = await this.queueRemote(caller, [{ address: name ?? `${AGENT_PREFIX}${agentId}`, serverId, agentId, name, title }], subject, body, thread);
+      return delivery!;
+    }
     const sender = await this.live(original.from.agentId);
     if (sender) {
       const [delivery] = await this.deliver(caller, [{ address: original.from.name ?? `${AGENT_PREFIX}${sender.id}`, registration: this.registry.get(sender.id) ?? null, agent: sender }], subject, body, thread);
@@ -313,14 +359,116 @@ export class Mailer {
     return deliveries;
   }
 
-  /** Hands outbox mail to the linked hosts it is for (design step 7). */
-  async flushOutbox(): Promise<void> {
-    throw new Error("not implemented");
+  /** Stores one outbox mail per remote target, then starts a hand-off the caller does not wait for. */
+  private async queueRemote(caller: Caller, targets: RemoteTarget[], subject: string, body: string, thread?: { threadId: string; inReplyTo: string }): Promise<Delivery[]> {
+    const from = { agentId: caller.id, name: this.registry.get(caller.id)?.name ?? null, title: caller.title, serverId: null };
+    const deliveries: Delivery[] = [];
+    for (const target of targets) {
+      const id = newId();
+      await this.store.create({
+        id,
+        threadId: thread?.threadId ?? id,
+        inReplyTo: thread?.inReplyTo ?? null,
+        from,
+        to: { agentId: target.agentId, address: target.address, serverId: target.serverId },
+        subject,
+        body,
+        createdAt: this.now(),
+        readAt: null,
+        nudgedAt: null,
+        bouncedAt: null,
+        seenAt: null,
+        handedOffAt: null,
+      });
+      deliveries.push({ address: target.address, agentId: target.agentId, serverId: target.serverId, name: target.name, title: target.title, mailId: id });
+    }
+    void this.flushOutbox().catch((error) => console.error("[paseo-mail] handing off the outbox failed:", (error as Error).message));
+    return deliveries;
+  }
+
+  /**
+   * Whether a remote agent is known to be archived or missing: its host reads online in a fresh
+   * directory read and the lookup by id says so. A read or lookup that throws, or a host that is
+   * not online, tells nothing, so the answer is false.
+   */
+  private async goneOnPeer(serverId: string, agentId: string): Promise<boolean> {
+    try {
+      const directory = await this.paseo.hostDirectory();
+      const host = directory.hosts.find((entry) => entry.serverId === serverId);
+      if (!host?.enabled || !host.online) return false;
+      const agent = await this.paseo.peerAgent(serverId, agentId);
+      return agent === null || agent.archived;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Hands outbox mail to the linked hosts it is for (design step 7). Passes run one at a time;
+   * a call made after a mail is stored runs a pass that sees it.
+   */
+  flushOutbox(): Promise<void> {
+    return this.handOffs.run(() => this.handOff());
+  }
+
+  private async handOff(): Promise<void> {
+    if (this.disposed) return;
+    // A fresh read: if it throws, the pass touches nothing (the rejection reaches the caller).
+    const directory = await this.paseo.hostDirectory();
+    const online = new Set(directory.hosts.filter((host) => host.enabled && host.online).map((host) => host.serverId));
+    const byHost = new Map<string, Mail[]>();
+    for (const mail of this.store.outbox()) {
+      const serverId = mail.to.serverId!;
+      if (!online.has(serverId)) continue;
+      byHost.set(serverId, [...(byHost.get(serverId) ?? []), mail]);
+    }
+    for (const [serverId, mails] of byHost) {
+      try {
+        await this.handOffTo(serverId, mails, directory.self.serverId);
+      } catch (error) {
+        // Stop this host for the pass, so no later mail to it overtakes the one that failed.
+        console.error(`[paseo-mail] handing mail to ${serverId} failed; retrying on the next pass:`, (error as Error).message);
+      }
+    }
+  }
+
+  /** Hands one host's outbox mail over in id order. Throws on the first failed call to the host. */
+  private async handOffTo(serverId: string, mails: Mail[], selfServerId: string): Promise<void> {
+    let published: PublishedAddress[] | null = null;
+    const publisherOf = async (name: string): Promise<string | null> => {
+      published ??= await this.paseo.peerAddresses(serverId);
+      const holders = published.filter((entry) => entry.name === name);
+      return holders.length === 1 ? holders[0]!.agentId : null;
+    };
+    for (const mail of mails) {
+      let agentId = mail.to.agentId;
+      if (agentId !== null) {
+        const agent = await this.paseo.peerAgent(serverId, agentId);
+        if (!agent || agent.archived) agentId = null;
+      }
+      if (agentId === null) {
+        const name = nameIn(mail.to.address);
+        agentId = name === null ? null : await publisherOf(name);
+      }
+      if (agentId === null) {
+        console.error(`[paseo-mail] mail ${mail.id} to "${mail.to.address}" on ${serverId} reaches no single agent; it stays in the outbox`);
+        continue;
+      }
+      await this.paseo.writeDrop(serverId, agentId, { ...mail, from: { ...mail.from, serverId: selfServerId } });
+      const handedOffAt = this.now();
+      await this.store.update([mail.id], (current) => {
+        current.handedOffAt ??= handedOffAt;
+      });
+    }
   }
 
   // ---------------------------------------------------------------- lifecycle
 
-  /** After a (re)start: nudge agents holding mail they were not nudged about, then publish every registry entry. */
+  /**
+   * After a (re)start: nudge agents holding mail they were not nudged about, publish every
+   * registry entry, watch the hosts, start the sweep and hand off the outbox. Each step is
+   * best-effort on its own, so one that fails never skips another.
+   */
   async start(): Promise<void> {
     for (const agentId of this.store.pendingNudges()) this.schedule(agentId);
     await this.refreshHosts();
@@ -329,6 +477,26 @@ export class Mailer {
       const current = this.registry.get(agentId);
       if (current) await this.publish(agentId, current);
     }
+    // dispose() may run before a start() nobody awaits gets here; a sweep armed now would outlive it.
+    if (this.disposed) return;
+    try {
+      this.paseo.watch({
+        hostOnline: () => void this.refreshHosts().then(() => this.flushOutbox()).catch((error) => console.error("[paseo-mail] hand-off on host online failed:", (error as Error).message)),
+        dropsChanged: () => {},
+      });
+    } catch (error) {
+      console.error("[paseo-mail] watching hosts failed:", (error as Error).message);
+    }
+    this.startSweep();
+    await this.flushOutbox().catch((error) => console.error("[paseo-mail] handing off the outbox failed:", (error as Error).message));
+  }
+
+  private startSweep(): void {
+    if (this.sweep) return;
+    this.sweep = setInterval(() => {
+      void this.flushOutbox().catch((error) => console.error("[paseo-mail] sweep hand-off failed:", (error as Error).message));
+    }, this.sweepMs);
+    (this.sweep as { unref?: () => void }).unref?.();
   }
 
   onTurnStarted(agentId: string): void {
@@ -386,6 +554,8 @@ export class Mailer {
     this.disposed = true;
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
+    if (this.sweep) clearInterval(this.sweep);
+    this.sweep = null;
     return Promise.all([this.paseo.release(), this.store.close(), this.registry.close()]).then(() => undefined);
   }
 

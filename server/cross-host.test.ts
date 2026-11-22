@@ -1,3 +1,5 @@
+import { readdir, readFile, stat } from "node:fs/promises";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeNetwork, setup, setupPair, type Env, type FakePaseo } from "../test/fixtures";
 import type { Mailer, MailerOptions } from "./mailer";
@@ -194,6 +196,73 @@ describe("importDrops: accept (design step 8)", () => {
     expect(mac.store.get("m_102")?.to.agentId).toBe("bg-id");
     expect(hasDrop(mac.paseo, "arch-id", "m_101")).toBe(false);
     expect(hasDrop(mac.paseo, "bg-id", "m_102")).toBe(false);
+  });
+});
+
+/** Every file under `root` (relative path → content), so a write anywhere in the data dir shows. */
+async function filesUnder(root: string): Promise<Record<string, string>> {
+  const found: Record<string, string> = {};
+  for (const name of (await readdir(root, { recursive: true })).sort()) {
+    const full = path.join(root, name);
+    if ((await stat(full)).isFile()) found[name] = await readFile(full, "utf8");
+  }
+  return found;
+}
+
+describe("importDrops: the mail id becomes a file name (lead ruling on the Task 6 review)", () => {
+  // A drop's id is written as <store dir>/<id>.json, so only the shape newId() produces may pass:
+  // /^m_[0-9a-z]{1,64}$/, written out here rather than read from production. The Mac's data dir
+  // already holds registry.json (probe is registered) and the store dir. Wrong: no check (stored, or
+  // a file written outside the store: ../registry overwrites registry.json); a check that parks
+  // instead of clearing; a pattern missing one axis below.
+  it.each([
+    { axis: "wrong prefix", id: "x_abc" },
+    { axis: "empty body", id: "m_" },
+    { axis: "too long (65)", id: `m_${"a".repeat(65)}` },
+    { axis: "upper-case prefix", id: "M_abc" },
+    { axis: "upper-case body", id: "m_ABC" },
+    { axis: "a dot in the body", id: "m_a.b" },
+    { axis: "a slash in the body", id: "m_a/b" },
+    { axis: "leading ../ before a good id", id: "../m_abc" },
+    { axis: "leading ../ to registry", id: "../registry" },
+    { axis: "trailing /..", id: "m_abc/.." },
+    { axis: "surrounding whitespace", id: " m_abc" },
+    { axis: "the reserved name", id: "mailboxes" },
+  ])("clears a drop whose id has $axis ($id), stores nothing and writes no file", async ({ id }) => {
+    const { mac } = await pairOf();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const before = await filesUnder(mac.root);
+    expect(Object.keys(before)).toContain("registry.json");
+    place(mac.paseo, "probe-id", id, dropped(id));
+    await mac.mailer.importDrops().catch(() => undefined);
+    // Soft, so a red run shows every effect at once (cleared? stored? which file written?).
+    expect.soft(clears(mac.paseo)).toEqual([["probe-id", id]]);
+    expect.soft(hasDrop(mac.paseo, "probe-id", id)).toBe(false);
+    expect.soft(mac.store.all()).toEqual([]);
+    expect.soft(await filesUnder(mac.root)).toEqual(before);
+  });
+
+  // Positive controls: the longest body the pattern allows, and an ordinary id. Each adds exactly
+  // its own <id>.json in the store dir. Wrong: a bound of 63 or fewer (the 64 one cleared).
+  it.each([
+    { kind: "a 64-character body", id: `m_${"a".repeat(64)}` },
+    { kind: "an ordinary id", id: "m_mi9x2k0000a1b2c3" },
+  ])("imports a drop whose id is $kind", async ({ id }) => {
+    const { mac } = await pairOf();
+    const before = await filesUnder(mac.root);
+    place(mac.paseo, "probe-id", id, dropped(id));
+    await mac.mailer.importDrops();
+    expect(mac.store.get(id)?.to.agentId).toBe("probe-id");
+    const after = await filesUnder(mac.root);
+    expect(Object.keys(after).filter((name) => !(name in before))).toEqual([path.join("mail", `${id}.json`)]);
+  });
+
+  // The id a sending daemon gives a mail must pass the receiver's check. Wrong: newId() and the
+  // pattern drifting apart (every cross-host mail would be cleared on arrival).
+  it("a mail this daemon sends has an id of that shape", async () => {
+    const { cantor, lead } = await pairOf();
+    const [delivery] = await cantor.mailer.send(lead, ["probe@m2-max"], "Ping", "x");
+    expect(delivery!.mailId).toMatch(/^m_[0-9a-z]{1,64}$/);
   });
 });
 

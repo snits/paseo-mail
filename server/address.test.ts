@@ -43,8 +43,11 @@ function entry(serverId: string, label: string | null, enabled = true): HostEntr
 }
 
 function book(...hosts: HostEntry[]): HostBook {
-  const view: HostDirectoryView = { self: { ...SELF }, hosts };
-  return new HostBook(view);
+  return bookOf(SELF, ...hosts);
+}
+
+function bookOf(self: HostDirectoryView["self"], ...hosts: HostEntry[]): HostBook {
+  return new HostBook({ self: { ...self }, hosts });
 }
 
 const remote = (serverId: string) => ({ kind: "remote", host: expect.objectContaining({ serverId }) });
@@ -108,11 +111,28 @@ describe("HostBook.resolve (design step 5)", () => {
     expect(book(entry("srv_Off", "attic")).resolve("srv_Off")).toEqual(remote("srv_Off"));
   });
 
-  // Wrong: no own-host check (the own serverId is unknown, the own label typed in another case too).
+  // Wrong: no own-host check (the own serverId is unknown, the own label typed in another case too);
+  // comparing the own serverId case-insensitively ("srv_self01" then reads as this daemon).
   it("resolves the own serverId and the own label to this daemon", () => {
     const hosts = book(entry("srv_EntwLoR9srmD", "m2-max"));
     expect(hosts.resolve("srv_Self01")).toEqual({ kind: "local" });
     expect(hosts.resolve(" CANTOR ")).toEqual({ kind: "local" });
+    expect(() => hosts.resolve("srv_self01")).toThrow(UserError);
+  });
+
+  // The own label carries whitespace (" Cantor ") and a linked host is labelled "cantor". Wrong:
+  // lower-casing the own label without trimming it (" cantor" never matches, so the linked twin wins).
+  it("trims the own label before comparing it", () => {
+    const hosts = bookOf({ serverId: "srv_Self01", label: " Cantor " }, entry("srv_Twin", "cantor"));
+    expect(hosts.resolve("cantor")).toEqual({ kind: "local" });
+  });
+
+  // The mailer's book before its first refresh has self { serverId: "", label: "" }. Wrong: no guard
+  // on an empty host part, so "" equals the empty own serverId and "probe@" routes to this daemon.
+  it("refuses an empty host part even when the own serverId and label are empty", () => {
+    const empty = bookOf({ serverId: "", label: "" });
+    expect(() => empty.resolve("")).toThrow(UserError);
+    expect(() => route(empty, "probe@")).toThrow(UserError);
   });
 
   // Wrong: an unknown host part treated as local, or thrown as a plain Error.
@@ -141,11 +161,22 @@ describe("HostBook.display (design step 10)", () => {
       entry("srv_NoLabel", null),
       entry("srv_MacA", "mac"),
       entry("srv_MacB", " MAC "),
+      entry("srv_Twin", "cantor"),
     );
     expect(hosts.display("srv_EntwLoR9srmD")).toBe("m2-max");
+    // "cantor" is unique among linked hosts but resolves to this daemon (own label "Cantor").
+    // Wrong: checking label uniqueness without the round-trip through resolve.
+    expect(hosts.display("srv_Twin")).toBe("srv_Twin");
     expect(hosts.display("srv_Spacey")).toBe("srv_Spacey");
     expect(hosts.display("srv_NoLabel")).toBe("srv_NoLabel");
     expect(hosts.display("srv_MacA")).toBe("srv_MacA");
     expect(hosts.display("srv_Unknown")).toBe("srv_Unknown");
+  });
+
+  // srv_a's label "srv_b" fits the pattern and is unique, but resolving it reaches srv_b by serverId.
+  // Wrong: accepting any remote match of the label without checking it is the same host.
+  it("shows the serverId when the label resolves to a different host", () => {
+    const hosts = book(entry("srv_a", "srv_b"), entry("srv_b", "x"));
+    expect(hosts.display("srv_a")).toBe("srv_a");
   });
 });

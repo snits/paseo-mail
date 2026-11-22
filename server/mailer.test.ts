@@ -615,14 +615,16 @@ describe("remote addresses (design steps 5 and 6, resolution half)", () => {
     expect(await cantor.mailer.resolve(lead, "Probe@m2-max")).toEqual([{ kind: "remote", serverId: MAC, agentId: "probe-id", name: "probe", title: "Probe" }]);
   });
 
-  // Today's code also throws a UserError here, but from normalize ("invalid name"), before any
-  // listing. Wrong: accepting the mail unresolved when nobody publishes the name.
+  // A normalize error ("invalid name") would also be a UserError, but comes before any listing.
+  // Wrong: accepting the mail unresolved when nobody publishes the name; one branch for "not
+  // exactly one" that tells the sender several agents hold a name nobody holds.
   it("refuses a name nobody on the online host publishes", async () => {
     const { cantor, mac, lead } = await linked();
     await mac.mailer.register(mac.paseo.add("other-id", { title: "Other" }), { name: "other" });
     const error = await cantor.mailer.resolve(lead, "probe@m2-max").catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(UserError);
     expect((error as Error).message).not.toMatch(/invalid name/);
+    expect((error as Error).message).not.toMatch(/several|more than one|multiple/i);
     expect(listings(cantor.paseo)).toContainEqual([MAC]);
     // Positive control: once probe publishes the name, the same address resolves.
     await mac.mailer.register(mac.paseo.add("probe-id", { title: "Probe" }), { name: "probe" });
@@ -644,12 +646,14 @@ describe("remote addresses (design steps 5 and 6, resolution half)", () => {
     expect((error as Error).message).toContain("p-two-id");
   });
 
-  // Wrong: refusing mail to a host that is not online; the name as typed ("Probe").
-  it("accepts name@host unresolved when the host is not online", async () => {
+  // Wrong: refusing mail to a host that is not online; the name as typed ("Probe"); trying the
+  // listing anyway (the fake records the call before it throws).
+  it("accepts name@host unresolved when the host is not online, without listing it", async () => {
     const { network, cantor, mac, lead } = await linked();
     await mac.mailer.register(mac.paseo.add("probe-id", { title: "Probe" }), { name: "probe" });
     network.setReachable(CANTOR, MAC, false);
     expect(await cantor.mailer.resolve(lead, "Probe@m2-max")).toEqual([unresolved(MAC, "probe")]);
+    expect(listings(cantor.paseo)).toEqual([]);
   });
 
   // The Mac reads online, but its listing throws. Wrong: folding the throw into "nobody publishes
@@ -684,6 +688,18 @@ describe("remote addresses (design steps 5 and 6, resolution half)", () => {
     await expect(cantor.mailer.resolve(lead, "role:qa@m2-max")).rejects.toThrow(/planned/);
     await expect(cantor.mailer.resolve(lead, "agent:probe-id@m2-max")).rejects.toBeInstanceOf(UserError);
     await expect(cantor.mailer.resolve(lead, "agent:probe-id@m2-max")).rejects.toThrow(/unsupported|not supported/);
+  });
+
+  // The same refusals with the own host. cantor has an agent named "qa" holding the role "qa".
+  // Wrong: refusing only after the host part resolves remote, so role:qa@cantor falls through to
+  // the local lookup of the name "qa" (and agent:<id>@cantor to a lookup of the id as a name).
+  it("refuses role:x@host and agent:x@host when the host is this daemon", async () => {
+    const { cantor, lead } = await linked();
+    await cantor.mailer.register(cantor.paseo.add("qa-id", { title: "QA" }), { name: "qa", roles: ["qa"] });
+    await expect(cantor.mailer.resolve(lead, "role:qa@cantor")).rejects.toThrow(/planned/);
+    await expect(cantor.mailer.resolve(lead, "agent:qa-id@cantor")).rejects.toThrow(/unsupported|not supported/);
+    // Positive control: the plain name reaches the agent through the same host part.
+    expect(await cantor.mailer.resolve(lead, "qa@cantor")).toMatchObject([{ kind: "local", agentId: "qa-id" }]);
   });
 
   // The local recipient comes first. Wrong: storing each copy as its target resolves (bob's copy
@@ -722,8 +738,8 @@ describe("remote addresses (design steps 5 and 6, resolution half)", () => {
   });
 
   // Wrong: replacing the snapshot with an empty book when the read throws; a refreshHosts() that
-  // never reads the directory (the read count shows it did).
-  it("refreshHosts() keeps the previous snapshot when the directory read throws", async () => {
+  // never reads the directory (the read count shows it did); rethrowing the read's error.
+  it("refreshHosts() keeps the previous snapshot when the directory read throws, and resolves", async () => {
     const { cantor } = await linked();
     expect(cantor.mailer.hosts().display(MAC)).toBe("m2-max");
     let reads = 0;
@@ -731,9 +747,28 @@ describe("remote addresses (design steps 5 and 6, resolution half)", () => {
       reads += 1;
       throw new Error("directory down");
     };
-    await cantor.mailer.refreshHosts().catch(() => undefined);
+    const kept = await cantor.mailer.refreshHosts();
     expect(reads).toBeGreaterThan(0);
+    expect(kept.display(MAC)).toBe("m2-max");
     expect(cantor.mailer.hosts().display(MAC)).toBe("m2-max");
+  });
+
+  // Wrong: a refreshHosts() that rethrows, or start() reading the directory unguarded: start()
+  // then rejects before the backfill and nothing is published.
+  it("start() still publishes the registry when the directory read throws", async () => {
+    const env = await setup({ debounceMs: 60_000 });
+    mailers.push(env.mailer);
+    env.paseo.add("a-carol");
+    await env.registry.set({ agentId: "a-carol", name: "carol", roles: [], workspaceId: null, projectId: null, updatedAt: "2026-11-22T10:00:00.000Z" });
+    let reads = 0;
+    env.paseo.hostDirectory = async () => {
+      reads += 1;
+      throw new Error("directory down");
+    };
+    await expect(env.mailer.start()).resolves.toBeUndefined();
+    expect(reads).toBeGreaterThan(0);
+    const published = env.paseo.calls.filter((call) => call.op === "publishAddress").map((call) => call.args);
+    expect(published).toEqual([["a-carol", { name: "carol", roles: [] }]]);
   });
 
   // The attic is linked after start() and unreachable, so only a fresh read knows it. Wrong:

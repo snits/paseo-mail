@@ -11,7 +11,7 @@
       "description": "Paseo 的智能体间邮件：持久化的邮箱，收件人空闲时发送一条简短提醒。智能体之间互发邮件，而不是互相打断。"
     }
   },
-  "requirements": { "paseo": ">=0.15.0" },
+  "requirements": { "paseo": ">=0.16.2" },
   "build": [["npm", "ci", "--omit=dev"]],
   "media": ["assets/mail-screen.png"]
 }

@@ -71,7 +71,7 @@ describe("contribute", () => {
     const tool = (name: string) => opened.tools.find((t) => t.name === name)!;
     expect(opened.tools.map((t) => t.name)).toContain("mail_send");
 
-    const toolContext = (id: string) => ({ ...context, agent: { id, workspaceId: "w1", parentAgentId: null, provider: "claude", cwd: "/tmp", title: id.toUpperCase() } });
+    const toolContext = (id: string) => ({ ...context, agent: { id, workspaceId: "w1", parentAgentId: null, provider: "claude", cwd: "/tmp", title: id.toUpperCase(), background: false, metadata: {} } });
     await tool("mail_register").execute({ name: "bob" }, toolContext("b"));
     await hooks.get("agent.turn.before")!({ agent: { id: "b" }, turnId: null }, context);
     expect((await tool("mail_send").execute({ to: "bob", subject: "Hi", body: "x" }, toolContext("a"))).text).toContain("→ bob");

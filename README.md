@@ -26,7 +26,7 @@ harmful, or work that is blocked right now.
 paseo plugin install https://github.com/lerenn/paseo-mail.git --ref vX.Y.Z
 ```
 
-Requires Paseo 0.15.0 or later.
+Requires Paseo 0.16.2 or later.
 
 ## How it works
 

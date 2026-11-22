@@ -19,7 +19,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {
-    "@getpaseo/plugin": "0.15.3",
+    "@getpaseo/plugin": "0.16.2",
     "@types/node": "^22.20.5",
     "@types/react": "~19.2.0",
     "react": "19.1.0",

@@ -1,4 +1,6 @@
+import type { PluginRpcContract } from "@getpaseo/plugin";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import type { ZodType } from "zod";
 import path from "node:path";
 import { Mailer } from "./server/mailer";
 import { PaseoAdapter, type PaseoApi } from "./server/paseo";
@@ -74,7 +76,10 @@ export default function contribute(server: PluginServerContext) {
   ];
 
   // Mail screen writes affect human viewing preferences only.
-  const handle: PluginServerContext["handle"] = (contract, handler) =>
+  const handle = <Input extends ZodType, Output extends ZodType>(
+    contract: PluginRpcContract<Input, Output>,
+    handler: Parameters<typeof server.handle<Input, Output>>[1],
+  ) =>
     server.handle(contract, async (input, context) => {
       await enter(context.paseo);
       return handler(input, context);

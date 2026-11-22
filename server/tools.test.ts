@@ -12,7 +12,7 @@ afterEach(async () => {
 
 function context(id: string, title: string | null = null): AgentToolContext {
   return {
-    agent: { id, workspaceId: "w1", parentAgentId: null, provider: "claude", cwd: "/tmp", title },
+    agent: { id, workspaceId: "w1", parentAgentId: null, provider: "claude", cwd: "/tmp", title, background: false, metadata: {} },
     paseo: {} as AgentToolContext["paseo"],
     signal: new AbortController().signal,
   };

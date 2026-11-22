@@ -228,6 +228,8 @@ describe("importDrops: the mail id becomes a file name (lead ruling on the Task 
     { axis: "trailing /..", id: "m_abc/.." },
     { axis: "surrounding whitespace", id: " m_abc" },
     { axis: "the reserved name", id: "mailboxes" },
+    // Wrong: a multi-line pattern (the second line, m_abc, would match on its own).
+    { axis: "a good id on a second line", id: "../registry\nm_abc" },
   ])("clears a drop whose id has $axis ($id), stores nothing and writes no file", async ({ id }) => {
     const { mac } = await pairOf();
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -240,6 +242,45 @@ describe("importDrops: the mail id becomes a file name (lead ruling on the Task 
     expect.soft(hasDrop(mac.paseo, "probe-id", id)).toBe(false);
     expect.soft(mac.store.all()).toEqual([]);
     expect.soft(await filesUnder(mac.root)).toEqual(before);
+  });
+
+  // The drop's key is a good id; the mail it carries is not. Wrong: checking the key, not the value's
+  // id (the mail is stored as ../registry.json, over registry.json).
+  it("checks the value's id, not the drop's key", async () => {
+    const { mac } = await pairOf();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const before = await filesUnder(mac.root);
+    place(mac.paseo, "probe-id", "m_100", dropped("../registry"));
+    await mac.mailer.importDrops().catch(() => undefined);
+    expect.soft(clears(mac.paseo)).toEqual([["probe-id", "m_100"]]);
+    expect.soft(mac.store.all()).toEqual([]);
+    expect.soft(await filesUnder(mac.root)).toEqual(before);
+  });
+
+  // The id check comes before any host or peer lookup: a bad id can never be imported, whatever
+  // the sender's host does. Wrong: checking it after the online check (parked while the host is
+  // offline) or after the sender lookup.
+  it("clears a bad id from an offline host without looking up its sender", async () => {
+    const { network, mac } = await pairOf();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    network.setReachable(MAC, CANTOR, false);
+    const before = await filesUnder(mac.root);
+    place(mac.paseo, "probe-id", "../registry", dropped("../registry"));
+    await mac.mailer.importDrops().catch(() => undefined);
+    expect.soft(clears(mac.paseo)).toEqual([["probe-id", "../registry"]]);
+    expect.soft(mac.paseo.calls.filter((call) => call.op === "peerAgent")).toEqual([]);
+    expect.soft(mac.store.all()).toEqual([]);
+    expect.soft(await filesUnder(mac.root)).toEqual(before);
+  });
+
+  // The ruling is "cleared and logged". Wrong: clearing it silently.
+  it("logs a drop it clears for its id, naming the id", async () => {
+    const { mac } = await pairOf();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    place(mac.paseo, "probe-id", "m_key", dropped("../registry"));
+    await mac.mailer.importDrops().catch(() => undefined);
+    const lines = errors.mock.calls.map((args) => args.map(String).join(" "));
+    expect(lines.filter((line) => line.includes("[paseo-mail]") && line.includes("../registry"))).toHaveLength(1);
   });
 
   // Positive controls: the longest body the pattern allows, and an ordinary id. Each adds exactly

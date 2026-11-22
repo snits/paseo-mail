@@ -508,6 +508,39 @@ describe("publishing paseo-mail.address (design step 4)", () => {
     ]);
   });
 
+  // The backfill races a register that lands while start() is still publishing. "a-abel" (name
+  // "abel") sorts before "a-xena" (name "alice") in registry.list(), so the backfill parks on abel
+  // while xena re-registers. Wrong: publishing each entry from the list copied when start() began
+  // (xena's stale { name: "alice" } lands after register's publish, so the daemon keeps "alice");
+  // publishing { name: null, roles: [] } for an entry that is gone (the "clears" case). Waiting for
+  // two parked publishes makes the race certain on that wrong version; a fix that runs the
+  // backfill inside the register queue never lets register park, so the wait is bounded.
+  it.each([
+    { change: "renames", input: { name: "bob" }, final: { name: "bob", roles: ["qa"] } },
+    { change: "clears", input: { name: "", roles: [] }, final: null },
+  ])("start() publishes an agent's current registration when it $change itself during the backfill", async ({ input, final }) => {
+    const env = await setup({ debounceMs: 60_000 });
+    current = env.mailer;
+    env.paseo.add("a-abel");
+    const xena = env.paseo.add("a-xena");
+    await env.registry.set({ agentId: "a-abel", name: "abel", roles: [], workspaceId: null, projectId: null, updatedAt: "2026-11-22T10:00:00.000Z" });
+    await env.registry.set({ agentId: "a-xena", name: "alice", roles: ["qa"], workspaceId: null, projectId: null, updatedAt: "2026-11-22T10:00:00.000Z" });
+    expect(env.registry.list().map((entry) => entry.agentId)).toEqual(["a-abel", "a-xena"]);
+    const release = env.paseo.holdPublishes();
+    const started = env.mailer.start();
+    const registered = env.mailer.register(xena, input);
+    for (let tries = 0; env.paseo.parkedPublishes < 2 && tries < 100; tries += 1) await wait(10);
+    release();
+    await Promise.all([started, registered]);
+    const xenaPublishes = published(env.paseo).filter(([agentId]) => agentId === "a-xena");
+    const settled = env.registry.get("a-xena");
+    expect(settled === undefined ? null : { name: settled.name, roles: settled.roles }).toEqual(final);
+    expect(xenaPublishes.at(-1)?.[1]).toEqual(final);
+    expect(env.paseo.metadata.get("a-xena")?.["paseo-mail.address"] ?? null).toEqual(final);
+    // Positive control: the backfill still publishes the entry nobody touched.
+    expect(published(env.paseo)).toContainEqual(["a-abel", { name: "abel", roles: [] }]);
+  });
+
   // Wrong: awaiting the publish without a catch (register rejects); publishing before the registry
   // write and letting the throw skip it. The recorded attempt shows the publish was reached.
   it("a publishAddress failure does not fail register, and the registration lands", async () => {

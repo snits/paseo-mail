@@ -40,6 +40,9 @@ export class FakePaseo implements PaseoPort {
   failSends = false;
   /** Makes `publishAddress` throw (after recording the call). */
   failPublish = false;
+  /** How many `publishAddress` calls have parked behind `holdPublishes` so far. */
+  parkedPublishes = 0;
+  private publishHold: Promise<void> | null = null;
 
   constructor(
     readonly self: { serverId: string; label: string } = { serverId: "srv_local", label: "local" },
@@ -89,7 +92,26 @@ export class FakePaseo implements PaseoPort {
     return { self: { ...this.self }, hosts };
   }
 
+  /**
+   * Parks every `publishAddress` (before it records or writes, like a slow daemon) until the
+   * returned function is called; parked calls then land in the order they were made.
+   */
+  holdPublishes(): () => void {
+    let release!: () => void;
+    this.publishHold = new Promise((resolve) => {
+      release = resolve;
+    });
+    return () => {
+      this.publishHold = null;
+      release();
+    };
+  }
+
   async publishAddress(agentId: string, address: { name: string | null; roles: string[] } | null): Promise<void> {
+    if (this.publishHold) {
+      this.parkedPublishes += 1;
+      await this.publishHold;
+    }
     this.record("publishAddress", agentId, address);
     if (this.failPublish) throw new Error("publishAddress failed");
     this.setMetadata(agentId, { [ADDRESS_KEY]: address === null ? null : structuredClone(address) });
@@ -107,7 +129,7 @@ export class FakePaseo implements PaseoPort {
     for (const agent of peer.agents.values()) {
       if (agent.archived) continue;
       const address = peer.metadata.get(agent.id)?.[ADDRESS_KEY] as { name?: unknown; roles?: unknown } | null | undefined;
-      if (!address || typeof address.name !== "string") continue;
+      if (!address || typeof address.name !== "string" || address.name === "") continue;
       const roles = Array.isArray(address.roles) ? address.roles.filter((role): role is string => typeof role === "string") : [];
       result.push({ agentId: agent.id, name: address.name, roles, title: agent.title });
     }

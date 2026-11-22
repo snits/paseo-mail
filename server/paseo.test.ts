@@ -91,6 +91,8 @@ function stubDaemon(serverId: string, agents: StubAgent[] = []) {
   let directory: Directory = { self: { serverId, label: serverId }, hosts: [] };
   let agentSubscription: StubSubscription | null = null;
   let hostSubscription: StubSubscription | null = null;
+  /** The last non-empty page still carries a cursor (hasMore false); the page past the end has none. */
+  let cursorOnLastPage = false;
   const dispose = vi.fn(async () => {});
 
   function page(options: ListOptions = {}) {
@@ -103,11 +105,12 @@ function stubDaemon(serverId: string, agents: StubAgent[] = []) {
     if (cursor !== undefined && !/^p\d+$/.test(cursor)) throw new Error(`unknown cursor ${cursor}`);
     const start = cursor === undefined ? 0 : Number(cursor.slice(1));
     const end = start + PAGE_SIZE;
-    const nextCursor = end < visible.length ? `p${end}` : null;
+    const hasMore = end < visible.length;
+    const nextCursor = hasMore || (cursorOnLastPage && start < visible.length) ? `p${end}` : null;
     return {
       requestId: "req",
       entries: visible.slice(start, end).map((agent) => ({ agent: snapshotOf(agent) })),
-      pageInfo: { nextCursor, prevCursor: start === 0 ? null : `p${Math.max(0, start - PAGE_SIZE)}`, hasMore: nextCursor !== null },
+      pageInfo: { nextCursor, prevCursor: start === 0 ? null : `p${Math.max(0, start - PAGE_SIZE)}`, hasMore },
     };
   }
 
@@ -172,6 +175,9 @@ function stubDaemon(serverId: string, agents: StubAgent[] = []) {
     dispose,
     setDirectory(next: Directory) {
       directory = next;
+    },
+    keepCursorOnLastPage() {
+      cursorOnLastPage = true;
     },
     /** Delivers a directory change the way the SDK does (`hosts.changed` on the observe subscription). */
     emitHosts(next: Directory) {
@@ -387,6 +393,21 @@ describe("PaseoAdapter paging", () => {
       expect(limit).toBeLessThanOrEqual(200);
     }
   });
+
+  // Wrong: stopping only on a null nextCursor (a third call, for the empty page past the end);
+  // stopping on a page shorter than the limit (one call, and the hit on page 2 is lost). Four
+  // agents at two per page: page 2 says hasMore false but still carries a cursor.
+  it("stops when hasMore is false even if a cursor is present", async () => {
+    const local = stubDaemon("srv_Self1", [{ id: "a-1" }, { id: "a-2" }, { id: "a-3" }, { id: "a-4", metadata: { "paseo-mail.in.m_4": { n: 4 } } }]);
+    const peer = stubDaemon("srv_Peer9", [{ id: "a-5" }, { id: "a-6" }, { id: "a-7" }, { id: "a-8", metadata: { "paseo-mail.address": { name: "eight", roles: [] } } }]);
+    local.keepCursorOnLastPage();
+    peer.keepCursorOnLastPage();
+    local.peers.set("srv_Peer9", peer);
+    const adapter = attached(local);
+    expect(await adapter.localDrops()).toEqual([{ agentId: "a-4", mailId: "m_4", value: { n: 4 } }]);
+    expect(await adapter.peerAddresses("srv_Peer9")).toEqual([{ agentId: "a-8", name: "eight", roles: [], title: null }]);
+    expect({ local: local.listCalls.length, peer: peer.listCalls.length }).toEqual({ local: 2, peer: 2 });
+  });
 });
 
 describe("PaseoAdapter.localDrops", () => {
@@ -532,6 +553,29 @@ describe("PaseoAdapter.release", () => {
     await adapter.release();
     await settle();
     expect(local.released()).toEqual({ hosts: 1, agents: 1 });
+  });
+
+  // Wrong: peer() opening (and caching) a client after release(), which nothing then disposes;
+  // guarding one public method but not the others; opening the client and then refusing. Both
+  // peers are routable, so a rejection cannot come from "no route". Positive control: the same
+  // adapter connects to srv_Peer9 before release().
+  it("refuses every peer call after release() and opens no client", async () => {
+    const local = stubDaemon("srv_Self1");
+    const peerA = stubDaemon("srv_Peer9", [{ id: "a-remote" }]);
+    const peerB = stubDaemon("srv_Peer7", [{ id: "a-other" }]);
+    local.peers.set("srv_Peer9", peerA);
+    local.peers.set("srv_Peer7", peerB);
+    const adapter = attached(local);
+    await expect(adapter.peerAgent("srv_Peer9", "a-remote")).resolves.toMatchObject({ id: "a-remote" });
+    expect(local.clientCalls).toEqual(["srv_Peer9"]);
+    await adapter.release();
+    for (const serverId of ["srv_Peer9", "srv_Peer7"]) {
+      await expect(adapter.peerAgent(serverId, "a-remote")).rejects.toThrow();
+      await expect(adapter.peerAddresses(serverId)).rejects.toThrow();
+      await expect(adapter.writeDrop(serverId, "a-remote", mail)).rejects.toThrow();
+    }
+    expect(local.clientCalls).toEqual(["srv_Peer9"]);
+    expect({ peerA: peerA.patches, peerB: peerB.patches }).toEqual({ peerA: [], peerB: [] });
   });
 
   // Wrong: Promise.all instead of allSettled (release() rejects when one dispose does).

@@ -34,7 +34,7 @@ Four steps, from claiming an address to reading a reply.
 
 ### 1. Register
 
-An agent claims an address with `mail_register`: a unique `name`, and any
+An agent claims an address with `mail_register`: a `name`, unique on its daemon, and any
 number of shared `roles`. Agent ids change when agents are replaced, so prefer names; an id
 is only for an agent that has not registered yet. **An agent must register a name before it can
 read its mail** (a role alone does not count): until then `mail_list` and `mail_read` refuse and say how
@@ -48,12 +48,14 @@ holders in the sender's workspace, else its project, else anywhere. An address w
 live holder is an error, and nothing is sent.
 
 `name@host` reaches an agent on another daemon that yours is linked to in Paseo. `host` is that
-host's label, in any case, or its serverId, which works even when the label is missing or shared.
+host's label, in any case, or its serverId. A label that is missing, not a valid name, or shared
+by two linked hosts cannot be used; use the serverId, which always works.
 When the host is online the name is checked at send time like a local one; when it is not, the
 mail is accepted and waits on the sender's daemon until the host comes back. A body sent to
 another host is at most 32 KiB. Both daemons need paseo-mail 0.3.0 or later: a daemon without
 it publishes no addresses, so its agents cannot be found by name, and it never imports the mail
-handed to it. `role:<role>@host` is planned.
+handed to it. Both daemons must also link each other in Paseo: a daemon with no link to the
+sender's host drops the mail unstored, and the sender is not told. `role:<role>@host` is planned.
 
 ### 3. Deliver
 

@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { setup } from "../test/fixtures";
 import { nudgeText, type Mailer } from "./mailer";
@@ -339,5 +341,36 @@ describe("idle nudge", () => {
     second.mailer.start();
     await wait();
     expect(second.paseo.sent).toEqual([{ agentId: "b", text: nudgeText(1) }]);
+  });
+});
+
+describe("stored identity of written mail", () => {
+  /** The mail as written to disk, before any schema default fills a missing key in. */
+  async function onDisk(dir: string, id: string): Promise<unknown> {
+    return JSON.parse(await readFile(path.join(dir, `${id}.json`), "utf8"));
+  }
+
+  // Wrong: a writer that leaves the keys out and relies on the schema defaults reads back as
+  // null after a reload, but the file lacks them; only the raw file tells the two apart.
+  it("writes from.serverId, to.serverId and handedOffAt as null on a local send", async () => {
+    const { mailer, store, alice } = await pair();
+    const [delivery] = await mailer.send(alice, ["bob"], "Hello", "Body");
+    const written = await onDisk(store.dir, delivery!.mailId);
+    expect(written).toHaveProperty("from.serverId", null);
+    expect(written).toHaveProperty("to.serverId", null);
+    expect(written).toHaveProperty("handedOffAt", null);
+  });
+
+  it("writes from.serverId, to.serverId and handedOffAt as null on an archive bounce", async () => {
+    const { mailer, store, paseo, alice } = await pair();
+    await mailer.send(alice, ["bob"], "Unread", "y");
+    paseo.archive("bob-id");
+    await mailer.onArchived("bob-id");
+    const [bounce] = mailer.list("alice-id");
+    expect(bounce).toMatchObject({ subject: "Returned: Unread", from: { agentId: null } });
+    const written = await onDisk(store.dir, bounce!.id);
+    expect(written).toHaveProperty("from.serverId", null);
+    expect(written).toHaveProperty("to.serverId", null);
+    expect(written).toHaveProperty("handedOffAt", null);
   });
 });

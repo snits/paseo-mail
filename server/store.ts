@@ -3,6 +3,12 @@ import path from "node:path";
 import { Queue, writeAtomic } from "./files";
 import { MailSchema, type Mail } from "./types";
 
+/** Whether a mail is for this daemon. (Red-phase stub: paseo-mail#xsbz Task 2.) */
+export function isLocal(mail: Mail): boolean {
+  void mail;
+  return true;
+}
+
 /** One JSON file per mail, with an in-memory index. Writes are serialized. */
 export class MailStore {
   private readonly mails = new Map<string, Mail>();
@@ -59,6 +65,11 @@ export class MailStore {
   /** Agents with unread mail they have not been nudged about. */
   pendingNudges(): string[] {
     return [...new Set([...this.mails.values()].filter((mail) => mail.readAt === null && mail.nudgedAt === null && mail.bouncedAt === null).map((mail) => mail.to.agentId))];
+  }
+
+  /** Mail waiting to cross to another daemon, in id order. (Red-phase stub: paseo-mail#xsbz Task 2.) */
+  outbox(): Mail[] {
+    return [];
   }
 
   create(mail: Mail): Promise<Mail> {

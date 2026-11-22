@@ -124,8 +124,8 @@ export class Mailer {
   async resolve(caller: Caller, address: string): Promise<ResolvedTarget[]> {
     const parsed = parseAddress(address);
     if (parsed.host === null) return this.resolveLocal(caller, address.trim());
-    if (parsed.kind === "role") throw new UserError("addressing a role on another host (role:x@host) is planned, not available yet");
-    if (parsed.kind === "agent") throw new UserError("addressing an agent id on another host (agent:x@host) is unsupported; use its name");
+    if (parsed.kind === "role") throw new UserError("addressing a role at a host (role:x@host) is planned, not available yet");
+    if (parsed.kind === "agent") throw new UserError("addressing an agent id at a host (agent:x@host) is unsupported; use its name");
     const match = (await this.refreshHosts()).resolve(parsed.host);
     if (match.kind === "local") return this.resolveLocal(caller, parsed.local);
     const { serverId, online } = match.host;

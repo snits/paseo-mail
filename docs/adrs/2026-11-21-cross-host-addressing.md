@@ -21,10 +21,10 @@ to separate a host.
 - **Host part.** `<host>` is a linked host's Paseo label, lower-cased and trimmed, provided it
   then matches `[a-z0-9][a-z0-9._-]{0,63}`. A host has no label address when its label is null
   or does not match, or when two linked hosts share it. Such a host is addressed by its
-  `serverId` instead. `serverId` always works. A label belongs to the sender daemon's
-  registration of the link, not to the host itself, so one host can carry different labels on
-  different daemons. cantor's link calls the Mac `m2-max`, while the Mac's own label is
-  `M2 Max`. Mail shown on the recipient's side uses the recipient daemon's label for the
+  `serverId` instead. `serverId` works for any enabled link; a disabled link is ignored. A
+  label belongs to the sender daemon's registration of the link, not to the host itself, so
+  one host can carry different labels on different daemons. cantor's link calls the Mac
+  `m2-max`, while the Mac's own label is `M2 Max`. Mail shown on the recipient's side uses the recipient daemon's label for the
   sender's host. `<name>@<own host>`, by the daemon's own label once normalized or by its
   `serverId`, resolves locally.
 - **Published addresses.** `mail_register` still writes the local registry, and also sets the

@@ -29,7 +29,7 @@ export const MailboxSchema = z.object({
 });
 export type Mailbox = z.infer<typeof MailboxSchema>;
 
-const PartySchema = z.object({ agentId: z.string().nullable(), name: z.string().nullable(), title: z.string().nullable() });
+const PartySchema = z.object({ agentId: z.string().nullable(), name: z.string().nullable(), title: z.string().nullable(), serverId: z.string().nullable() });
 
 export const MailHeaderSchema = z.object({
   id: z.string(),
@@ -37,7 +37,7 @@ export const MailHeaderSchema = z.object({
   inReplyTo: z.string().nullable(),
   /** `agentId` is null for mail paseo-mail itself sent (returned mail). */
   from: PartySchema,
-  to: z.object({ agentId: z.string(), address: z.string() }),
+  to: z.object({ agentId: z.string().nullable(), address: z.string(), serverId: z.string().nullable() }),
   subject: z.string(),
   /** The start of the body, on one line. */
   preview: z.string(),
@@ -48,6 +48,8 @@ export const MailHeaderSchema = z.object({
   bouncedAt: z.string().nullable(),
   /** Set by a human opening the mail on the screen. */
   seenAt: z.string().nullable(),
+  /** When mail for another daemon was handed to it; null until then. */
+  handedOffAt: z.string().nullable(),
 });
 export type MailHeader = z.infer<typeof MailHeaderSchema>;
 

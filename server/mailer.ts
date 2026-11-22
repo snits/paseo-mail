@@ -222,7 +222,7 @@ export class Mailer {
     body: string,
     thread?: { threadId: string; inReplyTo: string },
   ): Promise<Delivery[]> {
-    const from = { agentId: caller.id, name: this.registry.get(caller.id)?.name ?? null, title: caller.title };
+    const from = { agentId: caller.id, name: this.registry.get(caller.id)?.name ?? null, title: caller.title, serverId: null };
     const deliveries: Delivery[] = [];
     for (const target of targets) {
       const id = newId();
@@ -231,7 +231,7 @@ export class Mailer {
         threadId: thread?.threadId ?? id,
         inReplyTo: thread?.inReplyTo ?? null,
         from,
-        to: { agentId: target.agent.id, address: target.address },
+        to: { agentId: target.agent.id, address: target.address, serverId: null },
         subject,
         body,
         createdAt: this.now(),
@@ -239,6 +239,7 @@ export class Mailer {
         nudgedAt: null,
         bouncedAt: null,
         seenAt: null,
+        handedOffAt: null,
       });
       deliveries.push({ address: target.address, agentId: target.agent.id, name: target.registration?.name ?? null, title: target.agent.title, mailId: id });
       this.schedule(target.agent.id);
@@ -288,8 +289,8 @@ export class Mailer {
         id,
         threadId: mail.threadId,
         inReplyTo: mail.id,
-        from: { agentId: null, name: "paseo-mail", title: null },
-        to: { agentId: sender.id, address: mail.from.name ?? sender.id },
+        from: { agentId: null, name: "paseo-mail", title: null, serverId: null },
+        to: { agentId: sender.id, address: mail.from.name ?? sender.id, serverId: null },
         subject: `Returned: ${mail.subject}`,
         body: `Your mail to "${mail.to.address}" was not read: the recipient was archived.\n\n--- original mail ---\n${mail.body}`,
         createdAt: this.now(),
@@ -297,6 +298,7 @@ export class Mailer {
         nudgedAt: null,
         bouncedAt: null,
         seenAt: null,
+        handedOffAt: null,
       });
       this.schedule(sender.id);
     }

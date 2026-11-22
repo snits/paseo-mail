@@ -6,7 +6,7 @@ export function mailboxLabel(box: Pick<Mailbox, "name" | "title" | "agentId">, n
 }
 
 /** Who a mail is from: the sender's name at send time, else its title, else its id. */
-export function senderLabel(from: MailHeader["from"], plugin: string): string {
+export function senderLabel(from: Pick<MailHeader["from"], "agentId" | "name" | "title">, plugin: string): string {
   if (from.agentId === null) return from.name ?? plugin;
   return from.name ?? from.title ?? from.agentId.slice(0, 8);
 }

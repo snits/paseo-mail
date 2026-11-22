@@ -3,10 +3,9 @@ import path from "node:path";
 import { Queue, writeAtomic } from "./files";
 import { MailSchema, type Mail } from "./types";
 
-/** Whether a mail is for this daemon. (Red-phase stub: paseo-mail#xsbz Task 2.) */
+/** Whether a mail is for this daemon. */
 export function isLocal(mail: Mail): boolean {
-  void mail;
-  return true;
+  return mail.to.serverId === null;
 }
 
 /** One JSON file per mail, with an in-memory index. Writes are serialized. */
@@ -55,7 +54,7 @@ export class MailStore {
 
   /** Mail to an agent, newest first. */
   inbox(agentId: string): Mail[] {
-    return [...this.mails.values()].filter((mail) => mail.to.agentId === agentId).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+    return [...this.mails.values()].filter((mail) => isLocal(mail) && mail.to.agentId === agentId).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
   }
 
   unread(agentId: string): Mail[] {
@@ -64,12 +63,18 @@ export class MailStore {
 
   /** Agents with unread mail they have not been nudged about. */
   pendingNudges(): string[] {
-    return [...new Set([...this.mails.values()].filter((mail) => mail.readAt === null && mail.nudgedAt === null && mail.bouncedAt === null).map((mail) => mail.to.agentId))];
+    return [
+      ...new Set(
+        [...this.mails.values()]
+          .filter((mail) => isLocal(mail) && mail.readAt === null && mail.nudgedAt === null && mail.bouncedAt === null)
+          .flatMap((mail) => (mail.to.agentId === null ? [] : [mail.to.agentId])),
+      ),
+    ];
   }
 
-  /** Mail waiting to cross to another daemon, in id order. (Red-phase stub: paseo-mail#xsbz Task 2.) */
+  /** Mail waiting to cross to another daemon, in id order. */
   outbox(): Mail[] {
-    return [];
+    return [...this.mails.values()].filter((mail) => !isLocal(mail) && mail.handedOffAt === null).sort((a, b) => a.id.localeCompare(b.id));
   }
 
   create(mail: Mail): Promise<Mail> {

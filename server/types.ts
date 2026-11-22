@@ -5,8 +5,9 @@ export const MailSchema = z.object({
   threadId: z.string(),
   inReplyTo: z.string().nullable(),
   /** `agentId` is null for mail the plugin itself sends (bounces). */
-  from: z.object({ agentId: z.string().nullable(), name: z.string().nullable(), title: z.string().nullable() }),
-  to: z.object({ agentId: z.string(), address: z.string() }),
+  from: z.object({ agentId: z.string().nullable(), name: z.string().nullable(), title: z.string().nullable(), serverId: z.string().nullable().default(null) }),
+  /** `serverId` null means this daemon; `agentId` is null for mail addressed to another daemon's agent by name. */
+  to: z.object({ agentId: z.string().nullable(), address: z.string(), serverId: z.string().nullable().default(null) }),
   subject: z.string(),
   body: z.string(),
   createdAt: z.string(),
@@ -19,6 +20,8 @@ export const MailSchema = z.object({
    * Absent in mail written before the screen existed.
    */
   seenAt: z.string().nullable().default(null),
+  /** When mail for another daemon was handed to it; null until then (and always null for local mail). */
+  handedOffAt: z.string().nullable().default(null),
 });
 export type Mail = z.infer<typeof MailSchema>;
 

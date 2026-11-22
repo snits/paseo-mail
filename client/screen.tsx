@@ -384,7 +384,7 @@ function ReaderPane(props: { theme: Theme; t: T; mailId: string; revision: strin
   const current = state?.mail.id === mailId ? state : null;
   if (!current) return error ? <ErrorState theme={theme} t={t} message={error} /> : <Loading />;
   const { mail, thread } = current;
-  const recipientLive = props.box && !props.box.archived && props.box.agentId === mail.to.agentId;
+  const openableAgentId = props.box && !props.box.archived && props.box.agentId === mail.to.agentId ? mail.to.agentId : null;
   return (
     <ScrollView contentContainerStyle={{ padding: 18, gap: 14 }}>
       <View style={{ gap: 6 }}>
@@ -402,7 +402,7 @@ function ReaderPane(props: { theme: Theme; t: T; mailId: string; revision: strin
               markSeen({ id: mail.id, seen: false }).then(props.onChanged, (cause: unknown) => toast.error(cause instanceof Error ? cause.message : String(cause)))
             }
           />
-          {recipientLive && props.onOpenAgent ? <SmallButton theme={theme} icon="Bot" label={t("reader.openAgent")} onPress={() => props.onOpenAgent!(mail.to.agentId)} /> : null}
+          {openableAgentId !== null && props.onOpenAgent ? <SmallButton theme={theme} icon="Bot" label={t("reader.openAgent")} onPress={() => props.onOpenAgent!(openableAgentId)} /> : null}
         </View>
         <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>{t("reader.viewOnly")}</Text>
       </View>

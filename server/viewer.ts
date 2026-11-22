@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { FullMail, Mailbox, MailHeader } from "../shared/contracts";
 import type { Registry } from "./registry";
-import type { MailStore } from "./store";
+import { isLocal, type MailStore } from "./store";
 import { UserError, type AgentInfo, type Mail, type PaseoPort } from "./types";
 
 const PREVIEW_LENGTH = 140;
@@ -44,7 +44,7 @@ export class MailViewer {
     const received = new Map<string, Mail[]>();
     const sent = new Map<string, Mail[]>();
     for (const mail of mails) {
-      received.set(mail.to.agentId, [...(received.get(mail.to.agentId) ?? []), mail]);
+      if (isLocal(mail) && mail.to.agentId !== null) received.set(mail.to.agentId, [...(received.get(mail.to.agentId) ?? []), mail]);
       if (mail.from.agentId) sent.set(mail.from.agentId, [...(sent.get(mail.from.agentId) ?? []), mail]);
     }
     const ids = new Set([...this.registry.list().map((entry) => entry.agentId), ...received.keys()]);
@@ -52,18 +52,18 @@ export class MailViewer {
       [...ids].map(async (agentId): Promise<Mailbox> => {
         const registration = this.registry.get(agentId);
         const inbox = (received.get(agentId) ?? []).sort(newestFirst);
-        const outbox = (sent.get(agentId) ?? []).sort(newestFirst);
+        const sentMail = (sent.get(agentId) ?? []).sort(newestFirst);
         const agent = await this.agent(agentId);
         // A registered name wins; an archived agent has lost it, so take the last one it used.
         const name =
           registration?.name ??
-          outbox.find((mail) => mail.from.name)?.from.name ??
+          sentMail.find((mail) => mail.from.name)?.from.name ??
           inbox.find((mail) => !/^(role|agent):/i.test(mail.to.address))?.to.address.toLowerCase() ??
           null;
         return {
           agentId,
           name,
-          title: agent?.title ?? outbox.find((mail) => mail.from.title)?.from.title ?? null,
+          title: agent?.title ?? sentMail.find((mail) => mail.from.title)?.from.title ?? null,
           roles: registration?.roles ?? [],
           workspaceId: registration?.workspaceId ?? agent?.workspaceId ?? null,
           archived: !agent || agent.archived,

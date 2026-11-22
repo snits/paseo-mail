@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { HostBook, parseAddress } from "./address";
+import { AGENT_PREFIX, HostBook, parseAddress, type ParsedAddress } from "./address";
 import { Queue } from "./files";
 import { normalize, type Registry } from "./registry";
 import { isLocal, type MailStore } from "./store";
@@ -44,9 +44,6 @@ interface RemoteTarget {
   name: string | null;
   title: string | null;
 }
-
-const ROLE_PREFIX = "role:";
-const AGENT_PREFIX = "agent:";
 
 /** Refuses a body over the cross-host cap, measured in UTF-8 bytes. */
 function checkCrossHostBody(body: string): void {
@@ -187,11 +184,11 @@ export class Mailer {
   /** Resolves one address to the agents it reaches, here or on a linked host. Throws when it reaches none. */
   async resolve(caller: Caller, address: string): Promise<ResolvedTarget[]> {
     const parsed = parseAddress(address);
-    if (parsed.host === null) return this.resolveLocal(caller, address.trim());
+    if (parsed.host === null) return this.resolveLocal(caller, parsed);
     if (parsed.kind === "role") throw new UserError("addressing a role at a host (role:x@host) is planned, not available yet");
     if (parsed.kind === "agent") throw new UserError("addressing an agent id at a host (agent:x@host) is unsupported; use its name");
     const match = (await this.refreshHosts()).resolve(parsed.host);
-    if (match.kind === "local") return this.resolveLocal(caller, parsed.local);
+    if (match.kind === "local") return this.resolveLocal(caller, parsed);
     const { serverId, online } = match.host;
     if (online) {
       let published: PublishedAddress[] | null = null;
@@ -214,18 +211,19 @@ export class Mailer {
     return [{ kind: "remote", serverId, agentId: null, name: parsed.local, title: null }];
   }
 
-  private async resolveLocal(caller: Caller, trimmed: string): Promise<(ResolvedTarget & { kind: "local" })[]> {
-    if (trimmed.toLowerCase().startsWith(AGENT_PREFIX)) {
+  /** Resolves a parsed address on this daemon; its host part, if any, is already known to be this daemon. */
+  private async resolveLocal(caller: Caller, { kind, local }: ParsedAddress): Promise<(ResolvedTarget & { kind: "local" })[]> {
+    if (kind === "agent") {
       // An agent id needs no registry entry (docs/adrs/2026-11-10-agent-id-addressing.md). Ids are case-sensitive.
-      const id = trimmed.slice(AGENT_PREFIX.length).trim();
+      const id = local;
       if (id === "") throw new UserError('give an agent id after "agent:"');
       const agent = await this.live(id);
       if (!agent) throw new UserError(`no live agent has the id "${id}" (it does not exist or is archived)`);
       if (agent.id === caller.id) throw new UserError("you cannot send mail to yourself");
       return [{ kind: "local", agentId: agent.id, registration: this.registry.get(agent.id) ?? null, agent }];
     }
-    if (trimmed.toLowerCase().startsWith(ROLE_PREFIX)) {
-      const role = normalize(trimmed.slice(ROLE_PREFIX.length), "role");
+    if (kind === "role") {
+      const role = local;
       const holders: { kind: "local"; agentId: string; registration: Registration; agent: AgentInfo }[] = [];
       for (const registration of this.registry.withRole(role)) {
         if (registration.agentId === caller.id) continue;
@@ -239,7 +237,7 @@ export class Mailer {
       const sameProject = project ? holders.filter((holder) => holder.registration.projectId === project) : [];
       return sameProject.length > 0 ? sameProject : holders;
     }
-    const name = normalize(trimmed, "name");
+    const name = local;
     const registration = this.registry.holderOf(name);
     const agent = registration ? await this.live(registration.agentId) : null;
     if (!registration || !agent) throw new UserError(`no live agent is registered as "${name}" (see mail_directory)`);
@@ -359,25 +357,10 @@ export class Mailer {
     body: string,
     thread?: { threadId: string; inReplyTo: string },
   ): Promise<Delivery[]> {
-    const from = { agentId: caller.id, name: this.registry.get(caller.id)?.name ?? null, title: caller.title, serverId: null };
+    const from = this.senderOf(caller);
     const deliveries: Delivery[] = [];
     for (const target of targets) {
-      const id = newId();
-      await this.store.create({
-        id,
-        threadId: thread?.threadId ?? id,
-        inReplyTo: thread?.inReplyTo ?? null,
-        from,
-        to: { agentId: target.agent.id, address: target.address, serverId: null },
-        subject,
-        body,
-        createdAt: this.now(),
-        readAt: null,
-        nudgedAt: null,
-        bouncedAt: null,
-        seenAt: null,
-        handedOffAt: null,
-      });
+      const id = await this.storeNew(from, { agentId: target.agent.id, address: target.address, serverId: null }, subject, body, thread);
       deliveries.push({ address: target.address, agentId: target.agent.id, name: target.registration?.name ?? null, title: target.agent.title, mailId: id, serverId: null });
       this.schedule(target.agent.id);
     }
@@ -386,25 +369,10 @@ export class Mailer {
 
   /** Stores one outbox mail per remote target, then starts a hand-off the caller does not wait for. */
   private async queueRemote(caller: Caller, targets: RemoteTarget[], subject: string, body: string, thread?: { threadId: string; inReplyTo: string }): Promise<Delivery[]> {
-    const from = { agentId: caller.id, name: this.registry.get(caller.id)?.name ?? null, title: caller.title, serverId: null };
+    const from = this.senderOf(caller);
     const deliveries: Delivery[] = [];
     for (const target of targets) {
-      const id = newId();
-      await this.store.create({
-        id,
-        threadId: thread?.threadId ?? id,
-        inReplyTo: thread?.inReplyTo ?? null,
-        from,
-        to: { agentId: target.agentId, address: target.address, serverId: target.serverId },
-        subject,
-        body,
-        createdAt: this.now(),
-        readAt: null,
-        nudgedAt: null,
-        bouncedAt: null,
-        seenAt: null,
-        handedOffAt: null,
-      });
+      const id = await this.storeNew(from, { agentId: target.agentId, address: target.address, serverId: target.serverId }, subject, body, thread);
       deliveries.push({ address: target.address, agentId: target.agentId, serverId: target.serverId, name: target.name, title: target.title, mailId: id });
     }
     void this.flushOutbox().catch((error) => console.error("[paseo-mail] handing off the outbox failed:", (error as Error).message));
@@ -440,7 +408,7 @@ export class Mailer {
     if (this.disposed) return;
     // A fresh read: if it throws, the pass touches nothing (the rejection reaches the caller).
     const directory = await this.paseo.hostDirectory();
-    const online = new Set(directory.hosts.filter((host) => host.enabled && host.online).map((host) => host.serverId));
+    const online = new Set(new HostBook(directory).onlineHosts().map((host) => host.serverId));
     const byHost = new Map<string, Mail[]>();
     for (const mail of this.store.outbox()) {
       const serverId = mail.to.serverId!;
@@ -624,22 +592,13 @@ export class Mailer {
       if (mail.from.agentId === null || mail.from.agentId === agentId) continue;
       const sender = await this.live(mail.from.agentId);
       if (!sender) continue;
-      const id = newId();
-      await this.store.create({
-        id,
-        threadId: mail.threadId,
-        inReplyTo: mail.id,
-        from: { agentId: null, name: "paseo-mail", title: null, serverId: null },
-        to: { agentId: sender.id, address: mail.from.name ?? sender.id, serverId: null },
-        subject: `Returned: ${mail.subject}`,
-        body: `Your mail to "${mail.to.address}" was not read: the recipient was archived.\n\n--- original mail ---\n${mail.body}`,
-        createdAt: this.now(),
-        readAt: null,
-        nudgedAt: null,
-        bouncedAt: null,
-        seenAt: null,
-        handedOffAt: null,
-      });
+      await this.storeNew(
+        { agentId: null, name: "paseo-mail", title: null, serverId: null },
+        { agentId: sender.id, address: mail.from.name ?? sender.id, serverId: null },
+        `Returned: ${mail.subject}`,
+        `Your mail to "${mail.to.address}" was not read: the recipient was archived.\n\n--- original mail ---\n${mail.body}`,
+        { threadId: mail.threadId, inReplyTo: mail.id },
+      );
       this.schedule(sender.id);
     }
   }
@@ -726,6 +685,32 @@ export class Mailer {
   }
 
   // ---------------------------------------------------------------- helpers
+
+  /** The caller as the sender of mail it sends now. */
+  private senderOf(caller: Caller): Mail["from"] {
+    return { agentId: caller.id, name: this.registry.get(caller.id)?.name ?? null, title: caller.title, serverId: null };
+  }
+
+  /** Stores a new, unstamped mail and returns its id; it starts its own thread unless `thread` is given. */
+  private async storeNew(from: Mail["from"], to: Mail["to"], subject: string, body: string, thread?: { threadId: string; inReplyTo: string }): Promise<string> {
+    const id = newId();
+    await this.store.create({
+      id,
+      threadId: thread?.threadId ?? id,
+      inReplyTo: thread?.inReplyTo ?? null,
+      from,
+      to,
+      subject,
+      body,
+      createdAt: this.now(),
+      readAt: null,
+      nudgedAt: null,
+      bouncedAt: null,
+      seenAt: null,
+      handedOffAt: null,
+    });
+    return id;
+  }
 
   /** Publishes the agent's address to the daemon. Best-effort: a failure is logged and never fails the caller. */
   private async publish(agentId: string, entry: { name: string | null; roles: string[] } | null): Promise<void> {

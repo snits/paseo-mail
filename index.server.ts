@@ -21,12 +21,12 @@ export default function contribute(server: PluginServerContext) {
   const mailer = new Mailer(store, registry, paseo);
   const viewer = new MailViewer(store, registry, paseo);
 
+  const quietly = (label: string, fn: () => Promise<void>) => fn().catch((error) => console.error(`[paseo-mail] ${label} failed:`, error));
   /** Every hook waits for the store; the first one attaches the daemon API and flushes held nudges. */
   const enter = async (api: PaseoApi) => {
     await ready;
-    if (paseo.attach(api)) void mailer.start().catch((error) => console.error("[paseo-mail] start failed:", error));
+    if (paseo.attach(api)) void quietly("start", () => mailer.start());
   };
-  const quietly = (label: string, fn: () => Promise<void>) => fn().catch((error) => console.error(`[paseo-mail] ${label} failed:`, error));
 
   const tools = mailTools(mailer).map((tool) => ({
     ...tool,
@@ -65,7 +65,7 @@ export default function contribute(server: PluginServerContext) {
       quietly("turn.after", async () => {
         await enter(context.paseo);
         mailer.onTurnEnded(agent.id);
-        void mailer.importDrops().catch((error) => console.error("[paseo-mail] import after turn failed:", error));
+        void quietly("import after turn", () => mailer.importDrops());
       }),
     ),
     server.addHook("agent.archive.after", ({ agent }, context) =>

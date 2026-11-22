@@ -9,7 +9,7 @@ export interface ParsedAddress {
 }
 
 const ROLE_PREFIX = "role:";
-const AGENT_PREFIX = "agent:";
+export const AGENT_PREFIX = "agent:";
 
 /** Splits on the first `@` before normalizing, so the host part keeps its case (serverIds are case-sensitive). */
 export function parseAddress(raw: string): ParsedAddress {

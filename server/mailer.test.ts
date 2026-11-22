@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { setup } from "../test/fixtures";
+import { setup, type FakePaseo } from "../test/fixtures";
 import { nudgeText, type Mailer } from "./mailer";
 import type { Mail } from "./types";
 
@@ -418,5 +418,97 @@ describe("stored identity of written mail", () => {
     expect(written).toHaveProperty("from.serverId", null);
     expect(written).toHaveProperty("to.serverId", null);
     expect(written).toHaveProperty("handedOffAt", null);
+  });
+});
+
+describe("publishing paseo-mail.address (design step 4)", () => {
+  /** The publishAddress calls recorded by the fake, as [agentId, address]. */
+  function published(paseo: FakePaseo): unknown[][] {
+    return paseo.calls.filter((call) => call.op === "publishAddress").map((call) => call.args);
+  }
+
+  async function fresh() {
+    const env = await setup({ debounceMs: 60_000 });
+    current = env.mailer;
+    const alice = env.paseo.add("alice-id", { title: "Alice", workspaceId: "w1" });
+    const bob = env.paseo.add("bob-id", { title: "Bob", workspaceId: "w1" });
+    return { ...env, alice, bob };
+  }
+
+  // Wrong: publishing the raw input (" Alice ", unsorted duplicate roles) instead of the stored
+  // entry; a roles-only update publishing { name: null } instead of keeping the name; the wrong agent.
+  it("register publishes the caller's stored {name, roles}", async () => {
+    const { mailer, paseo, alice, bob } = await fresh();
+    await mailer.register(alice, { name: " Alice ", roles: ["Review", "qa", "review"] });
+    await mailer.register(bob, { name: "bob" });
+    await mailer.register(alice, { roles: ["ops"] });
+    expect(published(paseo)).toEqual([
+      ["alice-id", { name: "alice", roles: ["qa", "review"] }],
+      ["bob-id", { name: "bob", roles: [] }],
+      ["alice-id", { name: "alice", roles: ["ops"] }],
+    ]);
+  });
+
+  // Wrong: publishing { name: null, roles: [] } instead of null; publishing null whenever the name
+  // is cleared (the middle call, roles still held, is the positive control).
+  it("register publishes null once name and roles are both cleared", async () => {
+    const { mailer, paseo, alice } = await fresh();
+    await mailer.register(alice, { name: "alice", roles: ["qa"] });
+    await mailer.register(alice, { name: "" });
+    await mailer.register(alice, { roles: [] });
+    expect(published(paseo)).toEqual([
+      ["alice-id", { name: "alice", roles: ["qa"] }],
+      ["alice-id", { name: null, roles: ["qa"] }],
+      ["alice-id", null],
+    ]);
+  });
+
+  // Wrong: no publish on archive; clearing the wrong agent (bob stays published).
+  it("onArchived publishes null for the archived agent", async () => {
+    const { mailer, paseo, alice, bob } = await fresh();
+    await mailer.register(alice, { name: "alice" });
+    await mailer.register(bob, { name: "bob", roles: ["qa"] });
+    paseo.archive("alice-id");
+    await mailer.onArchived("alice-id");
+    expect(published(paseo)).toEqual([
+      ["alice-id", { name: "alice", roles: [] }],
+      ["bob-id", { name: "bob", roles: ["qa"] }],
+      ["alice-id", null],
+    ]);
+  });
+
+  // Wrong: skipping the nameless (roles-only) entry; publishing names without roles; publishing
+  // only the first entry; not awaiting the backfill inside start(). Entries are written straight
+  // to the registry so register's own publishing does not pollute the record.
+  it("start() publishes every registry entry (backfill)", async () => {
+    const env = await setup({ debounceMs: 60_000 });
+    current = env.mailer;
+    const entries = [
+      { agentId: "a-carol", name: "carol", roles: ["ops"] },
+      { agentId: "a-dave", name: null, roles: ["qa", "review"] },
+      { agentId: "a-erin", name: "erin", roles: [] },
+    ];
+    for (const entry of entries) {
+      env.paseo.add(entry.agentId);
+      await env.registry.set({ ...entry, workspaceId: null, projectId: null, updatedAt: "2026-11-22T10:00:00.000Z" });
+    }
+    await env.mailer.start();
+    const calls = published(env.paseo).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    expect(calls).toEqual([
+      ["a-carol", { name: "carol", roles: ["ops"] }],
+      ["a-dave", { name: null, roles: ["qa", "review"] }],
+      ["a-erin", { name: "erin", roles: [] }],
+    ]);
+  });
+
+  // Wrong: awaiting the publish without a catch (register rejects); publishing before the registry
+  // write and letting the throw skip it. The recorded attempt shows the publish was reached.
+  it("a publishAddress failure does not fail register, and the registration lands", async () => {
+    const { mailer, paseo, registry, alice } = await fresh();
+    paseo.failPublish = true;
+    const entry = await mailer.register(alice, { name: "alice", roles: ["qa"] });
+    expect(entry).toMatchObject({ agentId: "alice-id", name: "alice", roles: ["qa"] });
+    expect(registry.get("alice-id")).toMatchObject({ name: "alice", roles: ["qa"] });
+    expect(published(paseo)).toEqual([["alice-id", { name: "alice", roles: ["qa"] }]]);
   });
 });

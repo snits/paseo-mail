@@ -1,5 +1,5 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import type { PaseoPort } from "./types";
+import type { AgentInfo, Drop, HostDirectoryView, Mail, PaseoPort, PortWatcher, PublishedAddress } from "./types";
 
 /** The daemon API handed to hooks and tools (typed via the SDK). */
 export type PaseoApi = PluginHandlerContext["paseo"];
@@ -34,4 +34,31 @@ export class PaseoAdapter implements PaseoPort {
   send(agentId: string, text: string) {
     return this.paseo().agents.ref(agentId).send(text, { activeTurnBehavior: "steer" });
   }
+
+  // Red-phase stubs (paseo-mail#xsbz Task 3): signatures only.
+  async hostDirectory(): Promise<HostDirectoryView> {
+    return { self: { serverId: "", label: "" }, hosts: [] };
+  }
+
+  async publishAddress(_agentId: string, _address: { name: string | null; roles: string[] } | null): Promise<void> {}
+
+  async peerAgent(_serverId: string, _agentId: string): Promise<AgentInfo | null> {
+    return null;
+  }
+
+  async peerAddresses(_serverId: string): Promise<PublishedAddress[]> {
+    return [];
+  }
+
+  async writeDrop(_serverId: string, _agentId: string, _mail: Mail): Promise<void> {}
+
+  async localDrops(): Promise<Drop[]> {
+    return [];
+  }
+
+  async clearDrop(_agentId: string, _mailId: string): Promise<void> {}
+
+  watch(_watcher: PortWatcher): void {}
+
+  async release(): Promise<void> {}
 }

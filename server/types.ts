@@ -44,12 +44,64 @@ export interface AgentInfo {
   archived: boolean;
 }
 
+/** A linked host as this daemon's directory lists it. */
+export interface HostEntry {
+  serverId: string;
+  label: string | null;
+  enabled: boolean;
+  online: boolean;
+}
+
+/** This daemon and its linked hosts; entries with a null `serverId` are dropped. */
+export interface HostDirectoryView {
+  self: { serverId: string; label: string };
+  hosts: HostEntry[];
+}
+
+/** An agent on a peer daemon that publishes `paseo-mail.address` with a name. */
+export interface PublishedAddress {
+  agentId: string;
+  name: string;
+  roles: string[];
+  title: string | null;
+}
+
+/** A `paseo-mail.in.<mailId>` key found on a local agent. */
+export interface Drop {
+  agentId: string;
+  mailId: string;
+  value: unknown;
+}
+
+/** Callbacks for host and drop changes (see `PaseoPort.watch`). */
+export interface PortWatcher {
+  hostOnline(serverId: string): void;
+  dropsChanged(): void;
+}
+
 /** The slice of the daemon API the mailer uses (adapter in paseo.ts, fake in tests). */
 export interface PaseoPort {
   /** null when the agent does not exist (any more). */
   agent(id: string): Promise<AgentInfo | null>;
   projectOf(workspaceId: string): Promise<string | null>;
   send(agentId: string, text: string): Promise<void>;
+  hostDirectory(): Promise<HostDirectoryView>;
+  publishAddress(agentId: string, address: { name: string | null; roles: string[] } | null): Promise<void>;
+  /** Found (archived or not) or null when missing; THROWS when the host cannot be reached. */
+  peerAgent(serverId: string, agentId: string): Promise<AgentInfo | null>;
+  /** Every page of the peer's non-archived agents (filter.includeBackground: true) that publish
+   *  `paseo-mail.address` with a name. Throws when unreachable. */
+  peerAddresses(serverId: string): Promise<PublishedAddress[]>;
+  /** Writes key `paseo-mail.in.<mail.id>` on the peer's agent. */
+  writeDrop(serverId: string, agentId: string, mail: Mail): Promise<void>;
+  /** `paseo-mail.in.*` keys on every local agent (includeArchived + includeBackground, all pages). */
+  localDrops(): Promise<Drop[]>;
+  clearDrop(agentId: string, mailId: string): Promise<void>;
+  /** hosts.observe() → hostOnline on a transition to online; an agent-list subscription (includeArchived +
+   *  includeBackground) update carrying a paseo-mail.in.* key → dropsChanged. */
+  watch(watcher: PortWatcher): void;
+  /** Releases every subscription and cached peer client the port opened. Called by Mailer.dispose(). */
+  release(): Promise<void>;
 }
 
 /** The agent calling a tool. */

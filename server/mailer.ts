@@ -250,7 +250,7 @@ export class Mailer {
   // ---------------------------------------------------------------- lifecycle
 
   /** After a (re)start: nudge agents holding mail they were not nudged about. */
-  start(): void {
+  async start(): Promise<void> {
     for (const agentId of this.store.pendingNudges()) this.schedule(agentId);
   }
 

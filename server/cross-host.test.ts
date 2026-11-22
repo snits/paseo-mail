@@ -399,6 +399,27 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     expect(hasDrop(mac.paseo, "probe-id", "m_100")).toBe(false);
   });
 
+  // Only setTimeout is faked (the nudge debounce; the sweep is a real setInterval), so I/O and
+  // promises stay real. Wrong: the duplicate branch scheduling a nudge too (a debounce timer armed).
+  // Positive control: the first, fresh drop arms one.
+  it("a duplicate drop schedules no nudge", async () => {
+    const { mac } = await pairOf();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      expect(vi.getTimerCount()).toBe(0);
+      place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
+      await mac.mailer.importDrops();
+      expect(vi.getTimerCount()).toBe(1);
+      vi.clearAllTimers();
+      place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
+      await mac.mailer.importDrops();
+      expect(hasDrop(mac.paseo, "probe-id", "m_100")).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // The drop's key says m_key; its value is mail m_100, already stored. Wrong: the duplicate check
   // on the key's id (create("m_100") throws and the drop parks); clearing by the value's id.
   it("checks a duplicate by the value's id and clears the drop by its key", async () => {

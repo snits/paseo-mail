@@ -1,6 +1,6 @@
 # Plugin SDK version
 
-Status: Accepted
+Status: Superseded by 2026-11-21-sdk-version-0-16.md
 
 ## Context
 

@@ -42,10 +42,16 @@ many mails are waiting. The mail is kept and shows up as soon as it registers.
 
 ### 2. Send
 
-`mail_send` takes a name, `role:<role>` or `agent:<agent id>` (or a list of them). `agent:<id>` reaches a
+`mail_send` takes a name, `role:<role>`, `agent:<agent id>` or `name@host` (or a list of them). `agent:<id>` reaches a
 live, non-archived agent with no registration, such as a child you just created. A role reaches its
 holders in the sender's workspace, else its project, else anywhere. An address with no
 live holder is an error, and nothing is sent.
+
+`name@host` reaches an agent on another daemon that yours is linked to in Paseo. `host` is that
+host's label, in any case, or its serverId, which works even when the label is missing or shared.
+When the host is online the name is checked at send time like a local one; when it is not, the
+mail is accepted and waits on the sender's daemon until the host comes back. A body sent to
+another host is at most 32 KiB. `role:<role>@host` is planned.
 
 ### 3. Deliver
 
@@ -90,8 +96,8 @@ mail change, shows one pane at a time on phones, and is translated into French a
 | Tool | Input | What it does |
 | --- | --- | --- |
 | `mail_register` | `name?`, `roles?` | Claim or change your name and roles. `name: ""` releases the name, `roles: []` clears the roles, and no arguments shows your registration. |
-| `mail_directory` | none | List the registered names and roles. |
-| `mail_send` | `to`, `subject`, `body` | Send mail to a name, `role:<role>`, `agent:<agent id>`, or a list of them. No name needed to send; the result says to use a recipient's name from now on, and warns if you have none. |
+| `mail_directory` | none | List the registered names and roles, and the names published on online linked hosts as `name@host`. |
+| `mail_send` | `to`, `subject`, `body` | Send mail to a name, `role:<role>`, `agent:<agent id>`, `name@host`, or a list of them. No name needed to send; the result says to use a recipient's name from now on, and warns if you have none. |
 | `mail_list` | `unread_only?`, `limit?` | List your mail, newest first, without bodies. Needs a registered name. |
 | `mail_read` | `id` | Read one mail and mark it read. Needs a registered name. |
 | `mail_reply` | `id`, `body` | Reply to the sender, in the same thread. |
@@ -115,7 +121,9 @@ tools, the nudge and the `Unread: N` line.
 ### Returned mail
 
 If a recipient is archived before reading its mail, the mail goes back to the sender as
-`Returned: <subject>`. Archiving an agent also releases its name.
+`Returned: <subject>`, when the sender is on the same daemon. Archiving an agent also releases
+its name. Returning mail across hosts is planned: on archive, after 24 hours undelivered, and for
+an address no agent on the host publishes.
 
 ### Storage
 

@@ -3,6 +3,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { setup } from "../test/fixtures";
 import { nudgeText, type Mailer } from "./mailer";
+import type { Mail } from "./types";
 
 let current: Mailer | null = null;
 afterEach(async () => {
@@ -341,6 +342,51 @@ describe("idle nudge", () => {
     second.mailer.start();
     await wait();
     expect(second.paseo.sent).toEqual([{ agentId: "b", text: nudgeText(1) }]);
+  });
+});
+
+describe("outbox mail", () => {
+  const PEER = "srv_EntwLoR9srmD";
+
+  /** A mail from alice to bob-id; `serverId` says whether it is local (null) or waiting to cross. */
+  function mailToBob(id: string, serverId: string | null): Mail {
+    return {
+      id,
+      threadId: id,
+      inReplyTo: null,
+      from: { agentId: "alice-id", name: "alice", title: "Alice", serverId: null },
+      to: { agentId: "bob-id", address: serverId === null ? "bob" : "bob@m2-max", serverId },
+      subject: id,
+      body: "b",
+      createdAt: "2026-11-21T10:00:00.000Z",
+      readAt: null,
+      nudgedAt: null,
+      bouncedAt: null,
+      seenAt: null,
+      handedOffAt: null,
+    };
+  }
+
+  // docs/adrs/2026-11-21-cross-host-delivery.md: outbox mail is not in any local inbox.
+  // Wrong: an ownership check on to.agentId alone lets a local agent whose id matches the remote
+  // recipient's read (stamping readAt) and reply to mail that is waiting to cross to another daemon.
+  // Wrong: the check added to read but not reply (or the reverse); each call is asserted on its own.
+  it("cannot be read or replied to by a local agent whose id matches its recipient", async () => {
+    const { mailer, store, bob } = await pair();
+    await store.create(mailToBob("m_out", PEER));
+    await expect(mailer.read("bob-id", "m_out")).rejects.toThrow('no mail "m_out" in your mailbox');
+    expect(store.get("m_out")?.readAt).toBeNull();
+    await expect(mailer.reply(bob, "m_out", "A")).rejects.toThrow('no mail "m_out" in your mailbox');
+    expect(mailer.list("alice-id")).toEqual([]);
+  });
+
+  // Positive control, and wrong: a check that refuses every store-created mail.
+  it("is readable and repliable by that agent once to.serverId is null", async () => {
+    const { mailer, store, bob } = await pair();
+    await store.create(mailToBob("m_local", null));
+    expect((await mailer.read("bob-id", "m_local")).readAt).not.toBeNull();
+    expect(await mailer.reply(bob, "m_local", "A")).toMatchObject({ agentId: "alice-id" });
+    expect(mailer.list("alice-id").map((m) => m.subject)).toEqual(["Re: m_local"]);
   });
 });
 

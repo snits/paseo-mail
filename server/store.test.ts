@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { tempDir } from "../test/fixtures";
+import { mailOf, tempDir } from "../test/fixtures";
 import { isLocal, MailStore } from "./store";
 import type { Mail } from "./types";
 
@@ -9,22 +9,7 @@ const PEER = "srv_EntwLoR9srmD";
 
 /** A mail from a local sender; `to` and any other field are the test's to set. */
 function mail(id: string, to: Mail["to"], extra: Partial<Mail> = {}): Mail {
-  return {
-    id,
-    threadId: id,
-    inReplyTo: null,
-    from: { agentId: "alice-id", name: "alice", title: null, serverId: null },
-    to,
-    subject: id,
-    body: "b",
-    createdAt: "2026-11-21T10:00:00.000Z",
-    readAt: null,
-    nudgedAt: null,
-    bouncedAt: null,
-    seenAt: null,
-    handedOffAt: null,
-    ...extra,
-  };
+  return mailOf({ id, from: { agentId: "alice-id", name: "alice", title: null, serverId: null }, to, subject: id, body: "b", createdAt: "2026-11-21T10:00:00.000Z", ...extra });
 }
 
 async function emptyStore(): Promise<MailStore> {

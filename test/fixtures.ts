@@ -1,10 +1,11 @@
+import type { AgentToolContext } from "@getpaseo/plugin/server";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Mailer, type MailerOptions } from "../server/mailer";
 import { Registry } from "../server/registry";
 import { MailStore } from "../server/store";
-import type { AgentInfo, Caller, Drop, HostDirectoryView, Mail, PaseoPort, PortWatcher, PublishedAddress } from "../server/types";
+import type { AgentInfo, Caller, Drop, HostDirectoryView, HostEntry, Mail, PaseoPort, PortWatcher, PublishedAddress } from "../server/types";
 
 /** The port operations `FakeNetwork.fault` can make fail against one host. */
 export type FaultOp = "peerAddresses" | "peerAgent" | "writeDrop";
@@ -15,8 +16,14 @@ export interface PortCall {
   args: unknown[];
 }
 
-const ADDRESS_KEY = "paseo-mail.address";
-const DROP_PREFIX = "paseo-mail.in.";
+/** The plugin's metadata keys, written out here rather than read from production. */
+export const ADDRESS_KEY = "paseo-mail.address";
+export const DROP_PREFIX = "paseo-mail.in.";
+
+/** The serverIds of the test hosts: cantor, the Mac and the attic. */
+export const CANTOR = "srv_Cantor01";
+export const MAC = "srv_EntwLoR9srmD";
+export const ATTIC = "srv_Attic01";
 
 /**
  * An in-memory daemon: agents with a status, workspaces with a project, recorded sends, plugin
@@ -289,18 +296,83 @@ export async function setup(options: MailerOptions = {}, dir?: string, paseo: Fa
 export type Env = Awaited<ReturnType<typeof setup>>;
 
 /**
- * Two linked daemons: cantor (`srv_Cantor01`, label "cantor") and the Mac (`srv_EntwLoR9srmD`,
- * label "M2 Max"). cantor lists the Mac as "m2-max"; the Mac lists cantor as "cantor".
- * Each has its own store, registry and started `Mailer`.
+ * The two daemons of `setupPair`, linked, with no store or `Mailer`: cantor (`srv_Cantor01`,
+ * label "cantor") and the Mac (`srv_EntwLoR9srmD`, label "M2 Max"). cantor lists the Mac as
+ * "m2-max"; the Mac lists cantor as "cantor".
  */
-export async function setupPair(options: MailerOptions = {}): Promise<{ network: FakeNetwork; cantor: Env; mac: Env }> {
+export function linkedHosts(): { network: FakeNetwork; cantorHost: FakePaseo; macHost: FakePaseo } {
   const network = new FakeNetwork();
-  const cantorHost = network.host("srv_Cantor01", "cantor");
-  const macHost = network.host("srv_EntwLoR9srmD", "M2 Max");
-  network.link("srv_Cantor01", "srv_EntwLoR9srmD", { label: "m2-max" });
-  network.link("srv_EntwLoR9srmD", "srv_Cantor01", { label: "cantor" });
+  const cantorHost = network.host(CANTOR, "cantor");
+  const macHost = network.host(MAC, "M2 Max");
+  network.link(CANTOR, MAC, { label: "m2-max" });
+  network.link(MAC, CANTOR, { label: "cantor" });
+  return { network, cantorHost, macHost };
+}
+
+/** The daemons of `linkedHosts`, each with its own store, registry and started `Mailer`. */
+export async function setupPair(options: MailerOptions = {}): Promise<{ network: FakeNetwork; cantor: Env; mac: Env }> {
+  const { network, cantorHost, macHost } = linkedHosts();
   const cantor = await setup(options, undefined, cantorHost);
   const mac = await setup(options, undefined, macHost);
   await Promise.all([cantor.mailer.start(), mac.mailer.start()]);
   return { network, cantor, mac };
+}
+
+/** Makes an agent on `host` publish `name`, as its own mailer would (written as metadata, so two agents may share one). */
+export function publish(host: FakePaseo, agentId: string, name: string, title?: string, roles: string[] = []): void {
+  host.add(agentId, { title });
+  host.setMetadata(agentId, { [ADDRESS_KEY]: { name, roles } });
+}
+
+/** Makes the port's directory report `serverId` with the given fields changed (the link itself is untouched); returns the undo. */
+export function reportHost(paseo: FakePaseo, serverId: string, change: Partial<HostEntry>): () => void {
+  const directory = paseo.hostDirectory.bind(paseo);
+  paseo.hostDirectory = async () => {
+    const view = await directory();
+    return { ...view, hosts: view.hosts.map((host) => (host.serverId === serverId ? { ...host, ...change } : host)) };
+  };
+  return () => {
+    paseo.hostDirectory = directory;
+  };
+}
+
+/** A tool context for the agent `id`, in workspace "w1". */
+export function toolContext(id: string, title: string | null = null): AgentToolContext {
+  return {
+    agent: { id, workspaceId: "w1", parentAgentId: null, provider: "claude", cwd: "/tmp", title, background: false, metadata: {} },
+    paseo: {} as AgentToolContext["paseo"],
+    signal: new AbortController().signal,
+  };
+}
+
+/**
+ * An unstamped mail with the given fields; by default it starts its own thread, its subject and
+ * body are `subject <id>` and `body <id>`, and it was created 2026-11-22T10:00:00.000Z.
+ */
+export function mailOf(fields: Pick<Mail, "id" | "from" | "to"> & Partial<Mail>): Mail {
+  const { id, from, to, ...rest } = fields;
+  return {
+    id,
+    threadId: id,
+    inReplyTo: null,
+    from,
+    to,
+    subject: `subject ${id}`,
+    body: `body ${id}`,
+    createdAt: "2026-11-22T10:00:00.000Z",
+    readAt: null,
+    nudgedAt: null,
+    bouncedAt: null,
+    seenAt: null,
+    handedOffAt: null,
+    ...rest,
+  };
+}
+
+export const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Polls `check` every 10 ms for at most `ms`; returns its last value. */
+export async function until(check: () => boolean, ms = 1000): Promise<boolean> {
+  for (let waited = 0; !check() && waited < ms; waited += 10) await wait(10);
+  return check();
 }

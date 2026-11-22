@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { FakeNetwork, setup, setupPair, type FakePaseo } from "../test/fixtures";
+import { CANTOR, FakeNetwork, MAC, mailOf, publish, setup, setupPair, type FakePaseo } from "../test/fixtures";
 import { HostBook } from "./address";
 import { nudgeText, type Mailer } from "./mailer";
 import { UserError, type Mail } from "./types";
@@ -231,21 +231,15 @@ describe("archived recipients", () => {
   it("leaves unread mail from a remote sender unbounced, with no local lookup; local senders still bounce", async () => {
     const { mailer, paseo, store, alice } = await pair();
     paseo.add("probe-id", { title: "Local Probe" });
-    await store.create({
-      id: "m_remote",
-      threadId: "m_remote",
-      inReplyTo: null,
-      from: { agentId: "probe-id", name: "probe", title: "Probe", serverId: "srv_EntwLoR9srmD" },
-      to: { agentId: "bob-id", address: "bob", serverId: null },
-      subject: "From afar",
-      body: "x",
-      createdAt: "2026-11-22T10:00:00.000Z",
-      readAt: null,
-      nudgedAt: null,
-      bouncedAt: null,
-      seenAt: null,
-      handedOffAt: null,
-    });
+    await store.create(
+      mailOf({
+        id: "m_remote",
+        from: { agentId: "probe-id", name: "probe", title: "Probe", serverId: "srv_EntwLoR9srmD" },
+        to: { agentId: "bob-id", address: "bob", serverId: null },
+        subject: "From afar",
+        body: "x",
+      }),
+    );
     const [local] = await mailer.send(alice, ["bob"], "From alice", "y");
     const lookups: string[] = [];
     const agent = paseo.agent.bind(paseo);
@@ -390,21 +384,14 @@ describe("outbox mail", () => {
 
   /** A mail from alice to bob-id; `serverId` says whether it is local (null) or waiting to cross. */
   function mailToBob(id: string, serverId: string | null): Mail {
-    return {
+    return mailOf({
       id,
-      threadId: id,
-      inReplyTo: null,
       from: { agentId: "alice-id", name: "alice", title: "Alice", serverId: null },
       to: { agentId: "bob-id", address: serverId === null ? "bob" : "bob@m2-max", serverId },
       subject: id,
       body: "b",
       createdAt: "2026-11-21T10:00:00.000Z",
-      readAt: null,
-      nudgedAt: null,
-      bouncedAt: null,
-      seenAt: null,
-      handedOffAt: null,
-    };
+    });
   }
 
   // docs/adrs/2026-11-21-cross-host-delivery.md: outbox mail is not in any local inbox.
@@ -620,9 +607,6 @@ describe("publishing paseo-mail.address (design step 4)", () => {
 });
 
 describe("remote addresses (design steps 5 and 6, resolution half)", () => {
-  const CANTOR = "srv_Cantor01";
-  const MAC = "srv_EntwLoR9srmD";
-  const ADDRESS_KEY = "paseo-mail.address";
   const mailers: Mailer[] = [];
   afterEach(async () => {
     await Promise.all(mailers.splice(0).map((mailer) => mailer.dispose()));
@@ -675,10 +659,7 @@ describe("remote addresses (design steps 5 and 6, resolution half)", () => {
   // an error that does not say who holds the name.
   it("refuses a name two agents on the host publish, naming both", async () => {
     const { cantor, mac, lead } = await linked();
-    for (const id of ["p-one-id", "p-two-id"]) {
-      mac.paseo.add(id);
-      mac.paseo.setMetadata(id, { [ADDRESS_KEY]: { name: "probe", roles: [] } });
-    }
+    for (const id of ["p-one-id", "p-two-id"]) publish(mac.paseo, id, "probe");
     const error = await cantor.mailer.resolve(lead, "probe@m2-max").catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(UserError);
     expect((error as Error).message).toContain("p-one-id");

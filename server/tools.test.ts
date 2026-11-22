@@ -1,6 +1,5 @@
-import type { AgentToolContext } from "@getpaseo/plugin/server";
 import { afterEach, describe, expect, it } from "vitest";
-import { setup } from "../test/fixtures";
+import { setup, toolContext } from "../test/fixtures";
 import type { Mailer } from "./mailer";
 import { mailTools, TOOL_NAMES } from "./tools";
 
@@ -10,21 +9,13 @@ afterEach(async () => {
   current = null;
 });
 
-function context(id: string, title: string | null = null): AgentToolContext {
-  return {
-    agent: { id, workspaceId: "w1", parentAgentId: null, provider: "claude", cwd: "/tmp", title, background: false, metadata: {} },
-    paseo: {} as AgentToolContext["paseo"],
-    signal: new AbortController().signal,
-  };
-}
-
 async function tools() {
   const env = await setup({ debounceMs: 60_000 });
   current = env.mailer;
   env.paseo.add("a", { title: "Alice", workspaceId: "w1" });
   env.paseo.add("b", { title: "Bob", workspaceId: "w1" });
   const byName = Object.fromEntries(mailTools(env.mailer).map((tool) => [tool.name, tool]));
-  const call = (name: string, input: unknown, agent: string) => byName[name]!.execute(byName[name]!.input.parse(input), context(agent, env.paseo.agents.get(agent)?.title ?? null));
+  const call = (name: string, input: unknown, agent: string) => byName[name]!.execute(byName[name]!.input.parse(input), toolContext(agent, env.paseo.agents.get(agent)?.title ?? null));
   return { ...env, byName, call };
 }
 

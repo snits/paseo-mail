@@ -1,17 +1,13 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FakeNetwork, setup, setupPair, type Env, type FakePaseo } from "../test/fixtures";
+import { ATTIC, CANTOR, DROP_PREFIX, MAC, linkedHosts, mailOf, reportHost, setup, setupPair, until, wait, type Env, type FakeNetwork, type FakePaseo } from "../test/fixtures";
 import type { Mailer, MailerOptions } from "./mailer";
-import type { HostEntry, Mail } from "./types";
+import type { Mail } from "./types";
 
 // Task 6 of paseo-mail#xsbz: the importer (design step 8) and the two-daemon end-to-end cases
 // (acceptance 8, 9 and 12). The archive-bounce half of step 9 is in mailer.test.ts.
 
-const CANTOR = "srv_Cantor01";
-const MAC = "srv_EntwLoR9srmD";
-const ATTIC = "srv_Attic01";
-const DROP_PREFIX = "paseo-mail.in.";
 /** The named idle nudge for one mail, written out here rather than read from nudgeText(). */
 const NUDGE_ONE = "[paseo-mail] You have 1 unread mail. Call mail_list to see them.";
 
@@ -20,14 +16,6 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(mailers.splice(0).map((mailer) => mailer.dispose()));
 });
-
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** Polls `check` every 10 ms for at most `ms`; returns its last value. */
-async function until(check: () => boolean, ms = 1000): Promise<boolean> {
-  for (let waited = 0; !check() && waited < ms; waited += 10) await wait(10);
-  return check();
-}
 
 /** cantor and the Mac, both started; "lead-id" lives on cantor, "probe-id" on the Mac, registered there as "probe". */
 async function pairOf(options: MailerOptions = {}) {
@@ -41,11 +29,7 @@ async function pairOf(options: MailerOptions = {}) {
 
 /** As pairOf, but the Mac's Mailer is built and not started. */
 async function macUnstarted() {
-  const network = new FakeNetwork();
-  const cantorHost = network.host(CANTOR, "cantor");
-  const macHost = network.host(MAC, "M2 Max");
-  network.link(CANTOR, MAC, { label: "m2-max" });
-  network.link(MAC, CANTOR, { label: "cantor" });
+  const { network, cantorHost, macHost } = linkedHosts();
   const cantor = await setup({ debounceMs: 60_000 }, undefined, cantorHost);
   const mac = await setup({ debounceMs: 60_000 }, undefined, macHost);
   mailers.push(cantor.mailer, mac.mailer);
@@ -57,21 +41,7 @@ async function macUnstarted() {
 
 /** A mail from lead on cantor to probe on the Mac, as cantor's hand-off writes it into the drop. */
 function dropped(id: string): Mail {
-  return {
-    id,
-    threadId: id,
-    inReplyTo: null,
-    from: { agentId: "lead-id", name: "lead", title: "Lead", serverId: CANTOR },
-    to: { agentId: "probe-id", address: "probe@m2-max", serverId: MAC },
-    subject: `subject ${id}`,
-    body: `body ${id}`,
-    createdAt: "2026-11-22T10:00:00.000Z",
-    readAt: null,
-    nudgedAt: null,
-    bouncedAt: null,
-    seenAt: null,
-    handedOffAt: null,
-  };
+  return mailOf({ id, from: { agentId: "lead-id", name: "lead", title: "Lead", serverId: CANTOR }, to: { agentId: "probe-id", address: "probe@m2-max", serverId: MAC } });
 }
 
 /** Writes a drop straight into the host's metadata (no watcher fires, so only an import pass sees it). */
@@ -86,18 +56,6 @@ function hasDrop(host: FakePaseo, agentId: string, mailId: string): boolean {
 /** The clearDrop calls the port recorded, as [agentId, mailId]. */
 function clears(host: FakePaseo): unknown[][] {
   return host.calls.filter((call) => call.op === "clearDrop").map((call) => call.args);
-}
-
-/** Makes the port's directory report `serverId` with the given fields changed; returns the undo. */
-function reportHost(paseo: FakePaseo, serverId: string, change: Partial<HostEntry>): () => void {
-  const directory = paseo.hostDirectory.bind(paseo);
-  paseo.hostDirectory = async () => {
-    const view = await directory();
-    return { ...view, hosts: view.hosts.map((host) => (host.serverId === serverId ? { ...host, ...change } : host)) };
-  };
-  return () => {
-    paseo.hostDirectory = directory;
-  };
 }
 
 describe("importDrops: accept (design step 8)", () => {

@@ -1,38 +1,18 @@
-import type { AgentToolContext } from "@getpaseo/plugin/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FakeNetwork, setup, type FakePaseo } from "../test/fixtures";
+import { ATTIC, CANTOR, MAC, linkedHosts, mailOf, publish, reportHost, setup, toolContext, type FakePaseo } from "../test/fixtures";
 import type { Mailer } from "./mailer";
 import { mailTools } from "./tools";
-import type { HostEntry, Mail } from "./types";
+import type { Mail } from "./types";
 
 // Task 7 of paseo-mail#xsbz: the tools show a remote party as name@host (design step 10,
 // acceptance 11). Every tool runs on cantor; the remote parties live on the Mac and the attic.
 // An agent acts on what the tool text says, so a wrong host part sends its next mail astray.
-
-const CANTOR = "srv_Cantor01";
-const MAC = "srv_EntwLoR9srmD";
-const ATTIC = "srv_Attic01";
-const ADDRESS_KEY = "paseo-mail.address";
 
 const mailers: Mailer[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(mailers.splice(0).map((mailer) => mailer.dispose()));
 });
-
-function context(id: string, title: string | null): AgentToolContext {
-  return {
-    agent: { id, workspaceId: "w1", parentAgentId: null, provider: "claude", cwd: "/tmp", title, background: false, metadata: {} },
-    paseo: {} as AgentToolContext["paseo"],
-    signal: new AbortController().signal,
-  };
-}
-
-/** Makes an agent on a peer publish a name, as its own mailer would (no mailer runs there). */
-function publish(host: FakePaseo, agentId: string, name: string, title: string, roles: string[] = []): void {
-  host.add(agentId, { title });
-  host.setMetadata(agentId, { [ADDRESS_KEY]: { name, roles } });
-}
 
 /**
  * cantor (started Mailer, tools), linked to the Mac as "m2-max" and to the attic as "attic". Only
@@ -41,13 +21,9 @@ function publish(host: FakePaseo, agentId: string, name: string, title: string, 
  * "lead" unless `registerLead` is false.
  */
 async function cantorTools(options: { registerLead?: boolean } = {}) {
-  const network = new FakeNetwork();
-  const cantorHost = network.host(CANTOR, "cantor");
-  const mac = network.host(MAC, "M2 Max");
+  const { network, cantorHost, macHost: mac } = linkedHosts();
   const attic = network.host(ATTIC, "attic");
-  network.link(CANTOR, MAC, { label: "m2-max" });
   network.link(CANTOR, ATTIC, { label: "attic" });
-  network.link(MAC, CANTOR, { label: "cantor" });
   network.link(ATTIC, CANTOR, { label: "cantor" });
   publish(mac, "probe-id", "probe", "Probe", ["qa"]);
   publish(attic, "scout-id", "scout", "Scout");
@@ -57,44 +33,18 @@ async function cantorTools(options: { registerLead?: boolean } = {}) {
   const lead = env.paseo.add("lead-id", { title: "Lead", workspaceId: "w1" });
   if (options.registerLead ?? true) await env.mailer.register(lead, { name: "lead" });
   const byName = Object.fromEntries(mailTools(env.mailer).map((tool) => [tool.name, tool]));
-  const call = (name: string, input: unknown, agent = "lead-id") => byName[name]!.execute(byName[name]!.input.parse(input), context(agent, env.paseo.agents.get(agent)?.title ?? null));
+  const call = (name: string, input: unknown, agent = "lead-id") => byName[name]!.execute(byName[name]!.input.parse(input), toolContext(agent, env.paseo.agents.get(agent)?.title ?? null));
   return { ...env, network, mac, attic, lead, call };
 }
 
 /** A mail in lead's inbox on cantor, from the given sender. */
 function received(id: string, from: Mail["from"], subject: string): Mail {
-  return {
-    id,
-    threadId: id,
-    inReplyTo: null,
-    from,
-    to: { agentId: "lead-id", address: "lead", serverId: null },
-    subject,
-    body: `body of ${subject}`,
-    createdAt: "2026-11-22T10:00:00.000Z",
-    readAt: null,
-    nudgedAt: null,
-    bouncedAt: null,
-    seenAt: null,
-    handedOffAt: null,
-  };
+  return mailOf({ id, from, to: { agentId: "lead-id", address: "lead", serverId: null }, subject, body: `body of ${subject}` });
 }
 
 const FROM_PROBE: Mail["from"] = { agentId: "probe-id", name: "probe", title: "Probe", serverId: MAC };
 /** Nameless, titled, mixed-case id: kills "append @host to today's sender()" and lower-casing. */
 const FROM_ANON: Mail["from"] = { agentId: "Anon-ID", name: null, title: "Anon", serverId: MAC };
-
-/** Makes cantor's port report `serverId` with the given fields changed; returns the undo. */
-function reportHost(paseo: FakePaseo, serverId: string, change: Partial<HostEntry>): () => void {
-  const directory = paseo.hostDirectory.bind(paseo);
-  paseo.hostDirectory = async () => {
-    const view = await directory();
-    return { ...view, hosts: view.hosts.map((host) => (host.serverId === serverId ? { ...host, ...change } : host)) };
-  };
-  return () => {
-    paseo.hostDirectory = directory;
-  };
-}
 
 interface RemoteEntry {
   address: string;

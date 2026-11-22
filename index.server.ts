@@ -24,7 +24,7 @@ export default function contribute(server: PluginServerContext) {
   /** Every hook waits for the store; the first one attaches the daemon API and flushes held nudges. */
   const enter = async (api: PaseoApi) => {
     await ready;
-    if (paseo.attach(api)) mailer.start();
+    if (paseo.attach(api)) void mailer.start().catch((error) => console.error("[paseo-mail] start failed:", error));
   };
   const quietly = (label: string, fn: () => Promise<void>) => fn().catch((error) => console.error(`[paseo-mail] ${label} failed:`, error));
 

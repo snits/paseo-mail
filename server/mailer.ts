@@ -96,7 +96,9 @@ export class Mailer {
       const projectId = current?.projectId ?? (caller.workspaceId ? await this.paseo.projectOf(caller.workspaceId).catch(() => null) : null);
       const entry: Registration = { agentId: caller.id, name, roles, workspaceId: caller.workspaceId, projectId, updatedAt: this.now() };
       await this.registry.set(entry);
-      return name === null && roles.length === 0 ? null : entry;
+      const stored = name === null && roles.length === 0 ? null : entry;
+      await this.publish(caller.id, stored);
+      return stored;
     });
   }
 
@@ -249,9 +251,10 @@ export class Mailer {
 
   // ---------------------------------------------------------------- lifecycle
 
-  /** After a (re)start: nudge agents holding mail they were not nudged about. */
+  /** After a (re)start: nudge agents holding mail they were not nudged about, then publish every registry entry. */
   async start(): Promise<void> {
     for (const agentId of this.store.pendingNudges()) this.schedule(agentId);
+    for (const entry of this.registry.list()) await this.publish(entry.agentId, entry);
   }
 
   onTurnStarted(agentId: string): void {
@@ -271,6 +274,7 @@ export class Mailer {
     this.inTurn.delete(agentId);
     this.sentAt.delete(agentId);
     await this.registry.remove(agentId);
+    await this.publish(agentId, null);
     const unread = this.store.unread(agentId).filter((mail) => mail.bouncedAt === null);
     if (unread.length === 0) return;
     const bouncedAt = this.now();
@@ -308,7 +312,7 @@ export class Mailer {
     this.disposed = true;
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
-    return Promise.all([this.store.close(), this.registry.close()]).then(() => undefined);
+    return Promise.all([this.paseo.release(), this.store.close(), this.registry.close()]).then(() => undefined);
   }
 
   // ---------------------------------------------------------------- nudge
@@ -384,6 +388,15 @@ export class Mailer {
   }
 
   // ---------------------------------------------------------------- helpers
+
+  /** Publishes the agent's address to the daemon. Best-effort: a failure is logged and never fails the caller. */
+  private async publish(agentId: string, entry: { name: string | null; roles: string[] } | null): Promise<void> {
+    try {
+      await this.paseo.publishAddress(agentId, entry && { name: entry.name, roles: entry.roles });
+    } catch (error) {
+      console.error(`[paseo-mail] publishing the address of ${agentId} failed:`, (error as Error).message);
+    }
+  }
 
   /** The agent if it exists and is not archived; a dead registration is dropped. */
   private async live(agentId: string): Promise<AgentInfo | null> {

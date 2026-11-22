@@ -702,17 +702,24 @@ describe("remote addresses (design steps 5 and 6, resolution half)", () => {
     expect(await cantor.mailer.resolve(lead, "qa@cantor")).toMatchObject([{ kind: "local", agentId: "qa-id" }]);
   });
 
-  // The local recipient comes first. Wrong: storing each copy as its target resolves (bob's copy
-  // lands before the remote one throws); storing the remote copy.
-  it("send refuses any remote target until cross-host delivery lands, and stores nothing", async () => {
-    const { cantor, mac, lead } = await linked();
+  // design step 6: a mixed send stores bob's local copy and one outbox copy in cantor's store; the
+  // Mac's store is untouched (hand-off writes a drop, never the peer's store). Wrong: still refusing
+  // remote targets; the remote copy stored as local (to.serverId null, so it lands in an inbox);
+  // the remote copy dropped.
+  it("send stores a mixed local + remote send as a local copy and an outbox copy", async () => {
+    const { network, cantor, mac, lead } = await linked();
     await cantor.mailer.register(cantor.paseo.add("bob-id", { title: "Bob" }), { name: "bob" });
     await mac.mailer.register(mac.paseo.add("probe-id", { title: "Probe" }), { name: "probe" });
-    const before = cantor.store.revision;
-    await expect(cantor.mailer.send(lead, ["bob", "probe@m2-max"], "s", "b")).rejects.toThrow("cross-host delivery is not available yet");
-    await expect(cantor.mailer.send(lead, ["bob", "probe@m2-max"], "s", "b")).rejects.toBeInstanceOf(UserError);
-    expect(cantor.store.revision).toBe(before);
-    expect(cantor.store.all()).toEqual([]);
+    network.fault(MAC, "writeDrop", true);
+    const deliveries = await cantor.mailer.send(lead, ["bob", "probe@m2-max"], "s", "b");
+    expect(deliveries).toHaveLength(2);
+    const local = deliveries.find((delivery) => delivery.serverId === null);
+    const remote = deliveries.find((delivery) => delivery.serverId === MAC);
+    expect(local).toMatchObject({ address: "bob", agentId: "bob-id" });
+    expect(remote).toMatchObject({ address: "probe@m2-max", agentId: "probe-id" });
+    expect(cantor.mailer.list("bob-id").map((mail) => mail.id)).toEqual([local!.mailId]);
+    expect(cantor.store.outbox().map((mail) => mail.id)).toEqual([remote!.mailId]);
+    expect(cantor.store.all()).toHaveLength(2);
     expect(mac.store.all()).toEqual([]);
   });
 

@@ -12,13 +12,20 @@ export interface MailerOptions {
   sendGraceMs?: number;
   /** Retries when an agent still reads as running though no turn start was seen. */
   maxRetries?: number;
+  /** How often the outbox hand-off (and, later, the drop import) runs on its own. Default 60 s. */
+  sweepMs?: number;
   now?: () => string;
 }
 
-/** One recipient of a send: the address as typed and the agent it reached. */
+/** Most UTF-8 bytes a mail body may have when it goes to another daemon. */
+export const CROSS_HOST_BODY_LIMIT = 32 * 1024;
+
+/** One recipient of a send: the address as typed and the agent it reached (null: not resolved yet, on another host). */
 export interface Delivery {
   address: string;
-  agentId: string;
+  agentId: string | null;
+  /** null for this daemon; else the host the mail waits to be handed to. */
+  serverId: string | null;
   name: string | null;
   title: string | null;
   mailId: string;
@@ -214,7 +221,7 @@ export class Mailer {
         if (!targets.has(target.agentId)) targets.set(target.agentId, { address: address.trim(), registration: target.registration, agent: target.agent });
       }
     }
-    if (remotes.size > 0) throw new UserError("cross-host delivery is not available yet");
+    if (remotes.size > 0) throw new Error("not implemented");
     return this.deliver(caller, [...targets.values()], subject, body, thread);
   }
 
@@ -300,10 +307,15 @@ export class Mailer {
         seenAt: null,
         handedOffAt: null,
       });
-      deliveries.push({ address: target.address, agentId: target.agent.id, name: target.registration?.name ?? null, title: target.agent.title, mailId: id });
+      deliveries.push({ address: target.address, agentId: target.agent.id, name: target.registration?.name ?? null, title: target.agent.title, mailId: id, serverId: null });
       this.schedule(target.agent.id);
     }
     return deliveries;
+  }
+
+  /** Hands outbox mail to the linked hosts it is for (design step 7). */
+  async flushOutbox(): Promise<void> {
+    throw new Error("not implemented");
   }
 
   // ---------------------------------------------------------------- lifecycle

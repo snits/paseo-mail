@@ -43,6 +43,9 @@ export class FakePaseo implements PaseoPort {
   /** How many `publishAddress` calls have parked behind `holdPublishes` so far. */
   parkedPublishes = 0;
   private publishHold: Promise<void> | null = null;
+  /** How many `writeDrop` calls have parked behind `holdWrites` so far. */
+  parkedWrites = 0;
+  private writeHold: Promise<void> | null = null;
 
   constructor(
     readonly self: { serverId: string; label: string } = { serverId: "srv_local", label: "local" },
@@ -136,7 +139,26 @@ export class FakePaseo implements PaseoPort {
     return result;
   }
 
+  /**
+   * Parks every `writeDrop` (before it records or writes, like a slow peer) until the returned
+   * function is called; parked calls then land in the order they were made.
+   */
+  holdWrites(): () => void {
+    let release!: () => void;
+    this.writeHold = new Promise((resolve) => {
+      release = resolve;
+    });
+    return () => {
+      this.writeHold = null;
+      release();
+    };
+  }
+
   async writeDrop(serverId: string, agentId: string, mail: Mail): Promise<void> {
+    if (this.writeHold) {
+      this.parkedWrites += 1;
+      await this.writeHold;
+    }
     this.record("writeDrop", serverId, agentId, mail);
     const peer = this.peer(serverId, "writeDrop");
     if (!peer.agents.has(agentId)) throw new Error(`agent ${agentId} does not exist on ${serverId}`);

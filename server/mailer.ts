@@ -167,6 +167,23 @@ export class Mailer {
     return result;
   }
 
+  /** The published addresses of every enabled, online linked host, as name@host. A host whose listing throws is skipped and logged. */
+  async remoteDirectory(): Promise<{ address: string; host: string; serverId: string; title: string | null }[]> {
+    const book = await this.refreshHosts();
+    const perHost = await Promise.all(
+      book.onlineHosts().map(async ({ serverId }) => {
+        const host = book.display(serverId);
+        try {
+          return (await this.paseo.peerAddresses(serverId)).map((entry) => ({ address: `${entry.name}@${host}`, host, serverId, title: entry.title }));
+        } catch (error) {
+          console.error(`[paseo-mail] listing the addresses on ${host} failed:`, (error as Error).message);
+          return [];
+        }
+      }),
+    );
+    return perHost.flat();
+  }
+
   /** Resolves one address to the agents it reaches, here or on a linked host. Throws when it reaches none. */
   async resolve(caller: Caller, address: string): Promise<ResolvedTarget[]> {
     const parsed = parseAddress(address);

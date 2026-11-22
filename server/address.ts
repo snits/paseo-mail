@@ -54,6 +54,11 @@ export class HostBook {
     throw new UserError(`unknown host "${hostPart}": use the label or the serverId of a linked host`);
   }
 
+  /** The linked hosts that are enabled and online. */
+  onlineHosts(): HostEntry[] {
+    return this.linked.filter((host) => host.online);
+  }
+
   /** The host's label when that label reaches the same host, else its serverId. */
   display(serverId: string): string {
     const host = this.linked.find((entry) => entry.serverId === serverId);

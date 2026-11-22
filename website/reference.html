@@ -36,6 +36,7 @@
 <li><strong>When the host is online</strong>, the name is checked at send time: nobody publishing it, or more than one agent publishing it, is an error and nothing is sent. <strong>When it is not online</strong>, or its agents cannot be listed, the send is accepted unchecked and the mail waits on the sender's daemon until the host can be reached. A typo then shows up only as mail that never leaves.</li>
 <li><strong>Shown as <code>name@host</code></strong>: the tools show a party on another daemon as <code>&lt;name&gt;@&lt;host&gt;</code>, or <code>agent:&lt;agent id&gt;@&lt;host&gt;</code> when it has no name. The host is this daemon's label for it when that label reaches it, else its serverId.</li>
 <li><code>agent:&lt;agent id&gt;@&lt;host&gt;</code> cannot be mailed: use the agent's name.</li>
+<li><strong>Both daemons</strong> need paseo-mail 0.3.0 or later. A daemon without it publishes no addresses, so its agents cannot be found by name, and it never imports the mail handed to it.</li>
 <li><code>role:&lt;role&gt;@&lt;host&gt;</code> (planned): a role on another host. Today it is refused.</li>
 </ul>
 <h2 id="tools">Tools</h2>

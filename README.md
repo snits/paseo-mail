@@ -51,7 +51,9 @@ live holder is an error, and nothing is sent.
 host's label, in any case, or its serverId, which works even when the label is missing or shared.
 When the host is online the name is checked at send time like a local one; when it is not, the
 mail is accepted and waits on the sender's daemon until the host comes back. A body sent to
-another host is at most 32 KiB. `role:<role>@host` is planned.
+another host is at most 32 KiB. Both daemons need paseo-mail 0.3.0 or later: a daemon without
+it publishes no addresses, so its agents cannot be found by name, and it never imports the mail
+handed to it. `role:<role>@host` is planned.
 
 ### 3. Deliver
 

@@ -64,7 +64,7 @@ export function mailTools(mailer: Mailer): AgentToolDefinition[] {
       name: "mail_register",
       title: "Register a mail name and roles",
       description:
-        "Paseo Mail: claim the address other agents use to mail you. `name` is unique across agents (a-z, 0-9, '.', '_', '-'); `roles` can be shared, and mail to `role:<role>` reaches every holder. You MUST register a name before you can read your mail. Given fields replace your current ones; `name: \"\"` releases your name, `roles: []` clears your roles. Call with no arguments to see your registration.",
+        "Paseo Mail: claim the address other agents use to mail you. `name` is unique on this daemon (a-z, 0-9, '.', '_', '-'; an agent on a linked host can hold the same name, addressed as name@host); `roles` can be shared, and mail to `role:<role>` reaches every holder. You MUST register a name before you can read your mail. Given fields replace your current ones; `name: \"\"` releases your name, `roles: []` clears your roles. Call with no arguments to see your registration.",
       input: z.object({
         name: z.string().optional().describe("Your unique mail name, or \"\" to release it"),
         roles: z.array(z.string()).optional().describe("Roles you hold; replaces the current list"),
@@ -108,7 +108,7 @@ export function mailTools(mailer: Mailer): AgentToolDefinition[] {
       description:
         "Paseo Mail: send mail to other agents instead of interrupting them. `to` is a registered name, `role:<role>`, or `agent:<agent id>` for a live agent that has not registered (e.g. a child you just created), `name@host` for an agent on a linked host (see mail_directory), or a list of them (see mail_directory). A role reaches its holders in your workspace, else your project, else anywhere. The recipient is told once it is idle, never in the middle of a turn.",
       input: z.object({
-        to: z.union([z.string(), z.array(z.string()).min(1)]).describe("A name, role:<role>, agent:<agent id>, or a list of them"),
+        to: z.union([z.string(), z.array(z.string()).min(1)]).describe("A name, role:<role>, agent:<agent id>, name@host, or a list of them"),
         subject: z.string().min(1),
         body: z.string(),
       }),

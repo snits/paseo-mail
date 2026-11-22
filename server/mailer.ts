@@ -254,7 +254,11 @@ export class Mailer {
   /** After a (re)start: nudge agents holding mail they were not nudged about, then publish every registry entry. */
   async start(): Promise<void> {
     for (const agentId of this.store.pendingNudges()) this.schedule(agentId);
-    for (const entry of this.registry.list()) await this.publish(entry.agentId, entry);
+    // Re-read each entry just before publishing: an agent may rename or clear itself while earlier publishes are in flight.
+    for (const { agentId } of this.registry.list()) {
+      const current = this.registry.get(agentId);
+      if (current) await this.publish(agentId, current);
+    }
   }
 
   onTurnStarted(agentId: string): void {

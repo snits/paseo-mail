@@ -100,6 +100,7 @@ export class PaseoAdapter implements PaseoPort {
   }
 
   private peer(serverId: string): Promise<PaseoApi> {
+    if (this.released) return Promise.reject(new Error(`the paseo adapter is released; no connection to ${serverId}`));
     let peer = this.peers.get(serverId);
     if (!peer) {
       peer = this.paseo().hosts.client(serverId);
@@ -183,6 +184,6 @@ async function* pages(api: PaseoApi, filter: { includeArchived?: boolean; includ
   do {
     const result = await api.agents.list({ filter, page: { limit: PAGE_LIMIT, cursor } });
     yield* result.entries;
-    cursor = result.pageInfo.nextCursor ?? undefined;
+    cursor = result.pageInfo.hasMore ? (result.pageInfo.nextCursor ?? undefined) : undefined;
   } while (cursor !== undefined);
 }

@@ -75,7 +75,13 @@ export function nudgeText(count: number, named = true): string {
 let lastStamp = 0;
 let counter = 0;
 
-/** Ids sort in creation order (time, then a counter), so mails sent in the same millisecond list in order. */
+/**
+ * The shape of a mail id, as newId() makes it. The store writes a mail to `<id>.json`, so an
+ * id from another daemon must match this before it is stored (no path separators, no dots).
+ */
+export const MAIL_ID = /^m_[0-9a-z]{1,64}$/;
+
+/** Ids sort in creation order (time, then a counter), so mails sent in the same millisecond list in order. Each matches MAIL_ID. */
 function newId(): string {
   const stamp = Date.now();
   counter = stamp === lastStamp ? counter + 1 : 0;
@@ -492,6 +498,8 @@ export class Mailer {
     const parsed = MailSchema.safeParse(drop.value);
     if (!parsed.success) return this.discard(drop, `${where} is not a mail`);
     const mail = parsed.data;
+    // The id becomes a file name in the store, so only the shape this plugin makes may pass.
+    if (!MAIL_ID.test(mail.id)) return this.discard(drop, `${where} has an id that is not a mail id (${JSON.stringify(mail.id)})`);
     const { serverId, agentId: senderId } = mail.from;
     const host = serverId === null ? undefined : directory.hosts.find((entry) => entry.serverId === serverId);
     if (serverId === null || !host) return this.discard(drop, `${where} comes from a host this daemon has no link to`);

@@ -6,7 +6,7 @@ Status: Accepted
 
 `2026-11-21-cross-host-delivery.md` sets how a mail crosses hosts: the sender keeps it in an
 outbox, hands it off as a metadata drop on the recipient agent, and the recipient's plugin
-imports it. Building it showed three gaps in that ADR.
+imports it. Building it showed four gaps in that ADR.
 
 - The hand-off resolves only mail that is not resolved yet. A mail resolved at send time, or a
   reply addressed to the agent that sent the original, can find that agent archived or gone by
@@ -17,6 +17,9 @@ imports it. Building it showed three gaps in that ADR.
   the address its mail was sent to, so `probe@m2-max` would become a local mailbox name.
 - The importer stores a mail under its own id, and the store writes each mail to `<id>.json`.
   An id from another daemon is input this daemon did not make.
+- The importer clears a drop whose `from.serverId` "is not a linked host". Read with "linked"
+  meaning an enabled link, that would clear, unstored, every drop from a host whose link is
+  disabled for a while, destroying mail that was already in transit.
 
 ## Decision
 
@@ -38,6 +41,11 @@ imports it. Building it showed three gaps in that ADR.
   cleared unstored and logged, before any host lookup, because the id becomes a file name in
   the store. This adds a fourth reason to the delivery ADR's list of drops cleared without
   being stored.
+- **Park a drop from a disabled link.** A drop whose `from.serverId` names a host in this
+  daemon's directory whose link is disabled, or which is not online, stays parked and is
+  checked again on the next pass. "Not a linked host", where a drop is cleared unstored, means
+  that no directory entry has that `serverId`, enabled or not. Disabling a link for a while
+  does not destroy mail in transit.
 
 ## Consequences
 

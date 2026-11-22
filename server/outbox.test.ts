@@ -375,9 +375,12 @@ describe("reply to a remote sender (design step 9)", () => {
 describe("hand-off: flushOutbox (design step 7)", () => {
   // cantor's serverId changes after start(), so only a fresh directory read gives the new one.
   // Wrong: from.serverId left null; set to the recipient's host (MAC); cached at start() (CANTOR).
+  // No mailer runs on the Mac: its importer would clear a drop from the renamed serverId, which it
+  // has no link to, before the peer's metadata is read.
   it("writes paseo-mail.in.<id> on the peer agent with the sender's serverId, then stamps handedOffAt", async () => {
-    const { cantor, mac } = await linked();
-    publisher(mac.paseo, "probe-id", "probe", "Probe");
+    const { cantor, mac } = await unstarted();
+    await cantor.mailer.start();
+    publisher(mac, "probe-id", "probe", "Probe");
     await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
     cantor.paseo.self.serverId = "srv_CantorRenamed";
     await cantor.mailer.flushOutbox();
@@ -388,7 +391,7 @@ describe("hand-off: flushOutbox (design step 7)", () => {
       agentId: "probe-id",
       mail: { id: "m_001", subject: "subject m_001", body: "body m_001", from: { agentId: "lead-id", name: "lead", serverId: "srv_CantorRenamed" } },
     });
-    expect(mac.paseo.metadata.get("probe-id")?.[`${DROP_PREFIX}m_001`]).toMatchObject({ id: "m_001", from: { serverId: "srv_CantorRenamed" } });
+    expect(mac.metadata.get("probe-id")?.[`${DROP_PREFIX}m_001`]).toMatchObject({ id: "m_001", from: { serverId: "srv_CantorRenamed" } });
     expect(stamped(cantor.store, "m_001")).toBe(true);
     expect(cantor.store.outbox()).toEqual([]);
   });

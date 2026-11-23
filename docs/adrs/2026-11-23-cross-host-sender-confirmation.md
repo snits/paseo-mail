@@ -45,6 +45,9 @@ accept criterion (last bullet below). Nothing else in either ADR is superseded.
   agent's records too, so confirming adds no peer read. A record matches a drop when it parses,
   names this daemon as `to.serverId` and the agent holding the drop as `to.agentId`, and carries
   the digest of the drop's mail.
+- **Forward-compatible records.** The importer ignores fields of a record it does not know, so a
+  later version may add one without older importers clearing its mail (Jerry's ruling on kata
+  paseo-mail#qkf2).
 - **Import order.**
   1. Parse, id shape, claimed host in the directory, non-null sender: as before; failures are
      cleared unstored.

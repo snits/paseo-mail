@@ -59,6 +59,18 @@ function clears(host: FakePaseo): unknown[][] {
   return host.calls.filter((call) => call.op === "clearDrop").map((call) => call.args);
 }
 
+/** Parks the host's peerAgent calls until `gate` settles; returns a check that one has parked. */
+function parkLookups(host: FakePaseo, gate: Promise<void>): () => boolean {
+  let parked = false;
+  const lookup = host.peerAgent.bind(host);
+  host.peerAgent = async (serverId, agentId) => {
+    parked = true;
+    await gate;
+    return lookup(serverId, agentId);
+  };
+  return () => parked;
+}
+
 describe("importDrops: accept (design step 8)", () => {
   // The drop carries every stamp set, a stale to.agentId ("old-id"), to.serverId set, a padded
   // mixed-case address, and non-default thread fields. Wrong: to.agentId kept from the value (old-id);
@@ -574,6 +586,115 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     const aboutM002 = mac.paseo.calls.filter((call) => (call.op === "peerAgent" && call.args[1] === "lead2-id") || (call.op === "clearDrop" && call.args[1] === "m_002"));
     if (disposing) expect(aboutM002).toEqual([]);
     else expect(aboutM002.map((call) => call.op)).toEqual(["peerAgent", "clearDrop"]);
+  });
+
+  // The pass is parked in its lookup of m_001's sender when dispose() runs; the test opens the gate.
+  // The pass is queued after start() returns. Wrong: dispose() as at 14b5e87a68b6 (resolves at once,
+  // and the pass stores m_001 and clears its drop afterwards); awaiting only the hand-off queue;
+  // awaiting an imports idle() taken before the pass was queued (it resolves at once). Positive
+  // control: once the gate opens, dispose() resolves.
+  it("dispose() waits for an import pass in flight, so nothing is stored or cleared after it resolves", async () => {
+    const { mac } = await pairOf();
+    place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const parked = parkLookups(mac.paseo, gate);
+    const events: string[] = [];
+    const create = mac.store.create.bind(mac.store);
+    mac.store.create = (mail) => {
+      events.push("create");
+      return create(mail);
+    };
+    const clear = mac.paseo.clearDrop.bind(mac.paseo);
+    mac.paseo.clearDrop = (agentId, mailId) => {
+      events.push("clear");
+      return clear(agentId, mailId);
+    };
+    try {
+      const pass = mac.mailer.importDrops().catch(() => undefined);
+      expect(await until(parked)).toBe(true);
+      const disposed = mac.mailer.dispose().then(() => {
+        events.push("disposed");
+      });
+      expect(await Promise.race([disposed.then(() => "resolved"), wait(100).then(() => "pending")])).toBe("pending");
+      open();
+      expect(await Promise.race([disposed.then(() => "resolved"), wait(1000).then(() => "pending")])).toBe("resolved");
+      await pass;
+      expect(events).toEqual(["create", "clear", "disposed"]);
+    } finally {
+      open();
+    }
+  });
+
+  // The pass is parked in its lookup of m_001's sender behind a gate that only release() settles: it
+  // rejects the call, as the SDK rejects a closed client's calls in flight. The test never opens it.
+  // Wrong: dispose() awaiting the queues before release() (it waits on a call only release() can
+  // end; in production, the SDK's 60 s request deadline). The failed lookup leaves the drop in place.
+  it("dispose() releases the port before it waits, so a parked lookup ends and the pass writes nothing", async () => {
+    const { mac } = await pairOf();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
+    let refuse!: (error: Error) => void;
+    const gate = new Promise<void>((_resolve, reject) => {
+      refuse = reject;
+    });
+    gate.catch(() => undefined);
+    const parked = parkLookups(mac.paseo, gate);
+    const release = mac.paseo.release.bind(mac.paseo);
+    mac.paseo.release = async () => {
+      refuse(new Error("client closed"));
+      await release();
+    };
+    try {
+      const pass = mac.mailer.importDrops().catch(() => undefined);
+      expect(await until(parked)).toBe(true);
+      const disposed = mac.mailer.dispose();
+      expect(await Promise.race([disposed.then(() => "resolved"), wait(1000).then(() => "pending")])).toBe("resolved");
+      await pass;
+      expect(mac.store.get("m_001")).toBeUndefined();
+      expect(hasDrop(mac.paseo, "probe-id", "m_001")).toBe(true);
+      expect(clears(mac.paseo)).toEqual([]);
+    } finally {
+      refuse(new Error("test over"));
+    }
+  });
+
+  // The pass is parked in its lookup of m_001's sender when dispose() runs; the test opens the gate.
+  // store.close() only waits for the store's own queue and refuses no later write, so the log records
+  // each call when it is made. Wrong: closing the store alongside the queue wait (a Promise.all of
+  // release(), idle() and close()); dispose() as at 14b5e87a68b6. Both log the close before the create.
+  it("dispose() closes the store only after an import pass in flight has stored its mail", async () => {
+    const { mac } = await pairOf();
+    place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const parked = parkLookups(mac.paseo, gate);
+    const events: string[] = [];
+    const create = mac.store.create.bind(mac.store);
+    mac.store.create = (mail) => {
+      events.push("create");
+      return create(mail);
+    };
+    const close = mac.store.close.bind(mac.store);
+    mac.store.close = () => {
+      events.push("close");
+      return close();
+    };
+    try {
+      const pass = mac.mailer.importDrops().catch(() => undefined);
+      expect(await until(parked)).toBe(true);
+      const disposed = mac.mailer.dispose();
+      open();
+      await pass;
+      await disposed;
+      expect(events).toEqual(["create", "close"]);
+    } finally {
+      open();
+    }
   });
 });
 

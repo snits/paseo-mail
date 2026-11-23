@@ -735,6 +735,102 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
     }
   });
 
+  // The pass is parked on m_001's write when dispose() runs; the test releases the write. The pass is
+  // queued after start() returns. Wrong: dispose() as at 14b5e87a68b6 (resolves at once, and the pass
+  // stamps handedOffAt afterwards); awaiting only the import queue; awaiting a hand-off idle() taken
+  // before the pass was queued (it resolves at once). Positive control: once the write is released,
+  // dispose() resolves.
+  it("dispose() waits for a hand-off pass in flight, so nothing is stamped after it resolves", async () => {
+    const { cantor, mac } = await linked();
+    publish(mac.paseo, "probe-id", "probe");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    const events: string[] = [];
+    const update = cantor.store.update.bind(cantor.store);
+    cantor.store.update = (ids, change) => {
+      events.push("update");
+      return update(ids, change);
+    };
+    const release = cantor.paseo.holdWrites();
+    held.push(release);
+    const pass = quiet(cantor.mailer.flushOutbox());
+    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    const disposed = cantor.mailer.dispose().then(() => {
+      events.push("disposed");
+    });
+    expect(await Promise.race([disposed.then(() => "resolved"), wait(100).then(() => "pending")])).toBe("pending");
+    release();
+    expect(await Promise.race([disposed.then(() => "resolved"), wait(1000).then(() => "pending")])).toBe("resolved");
+    await pass;
+    expect(events).toEqual(["update", "disposed"]);
+  });
+
+  // The pass is parked on m_001's write behind a gate that only release() settles: it rejects the
+  // call, as the SDK rejects a closed client's calls in flight. holdWrites() can only resolve, so the
+  // gate is the test's own; the test never opens it. Wrong: dispose() awaiting the queues before
+  // release() (it waits on a call only release() can end; in production, the SDK's 60 s request
+  // deadline). The failed write leaves m_001 in the outbox.
+  it("dispose() releases the port before it waits, so a parked write ends and nothing is stamped", async () => {
+    const { cantor, mac } = await linked();
+    publish(mac.paseo, "probe-id", "probe");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    let refuse!: (error: Error) => void;
+    const gate = new Promise<void>((_resolve, reject) => {
+      refuse = reject;
+    });
+    gate.catch(() => undefined);
+    held.push(() => refuse(new Error("test over")));
+    let parked = false;
+    const write = cantor.paseo.writeDrop.bind(cantor.paseo);
+    cantor.paseo.writeDrop = async (serverId, agentId, mail) => {
+      parked = true;
+      await gate;
+      return write(serverId, agentId, mail);
+    };
+    const release = cantor.paseo.release.bind(cantor.paseo);
+    cantor.paseo.release = async () => {
+      refuse(new Error("client closed"));
+      await release();
+    };
+    const pass = quiet(cantor.mailer.flushOutbox());
+    expect(await until(() => parked)).toBe(true);
+    const disposed = cantor.mailer.dispose();
+    expect(await Promise.race([disposed.then(() => "resolved"), wait(1000).then(() => "pending")])).toBe("resolved");
+    await pass;
+    expect(stamped(cantor.store, "m_001")).toBe(false);
+    expect(writes(cantor.paseo)).toEqual([]);
+    expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001"]);
+  });
+
+  // The pass is parked on m_001's write when dispose() runs; the test releases the write. store.close()
+  // only waits for the store's own queue and refuses no later write, so the log records each call when
+  // it is made. Wrong: closing the store alongside the queue wait (a Promise.all of release(), idle()
+  // and close()); dispose() as at 14b5e87a68b6. Both log the close before the stamp.
+  it("dispose() closes the store only after a hand-off pass in flight has stamped", async () => {
+    const { cantor, mac } = await linked();
+    publish(mac.paseo, "probe-id", "probe");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    const events: string[] = [];
+    const update = cantor.store.update.bind(cantor.store);
+    cantor.store.update = (ids, change) => {
+      events.push("update");
+      return update(ids, change);
+    };
+    const close = cantor.store.close.bind(cantor.store);
+    cantor.store.close = () => {
+      events.push("close");
+      return close();
+    };
+    const release = cantor.paseo.holdWrites();
+    held.push(release);
+    const pass = quiet(cantor.mailer.flushOutbox());
+    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    const disposed = cantor.mailer.dispose();
+    release();
+    await pass;
+    await disposed;
+    expect(events).toEqual(["update", "close"]);
+  });
+
   // Only setInterval is faked, so the 59 s mark is reached without waiting. Wrong: any other default
   // (1 s fires before the 59 s check; 120 s has not fired at 60 s). The expected 60 s is written here.
   it("the sweep runs every 60 s by default", async () => {

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { AGENT_PREFIX, HostBook, parseAddress, unknownHost, type ParsedAddress } from "./address";
 import { Queue } from "./files";
 import { normalize, type Registry } from "./registry";
@@ -82,8 +82,9 @@ export const MAIL_ID = /^m_[0-9a-z]{1,64}$/;
  * The digest a hand-off record carries: lowercase hex SHA-256 of the JSON array of the fields the
  * importer keeps, in a fixed order, taken from the mail exactly as the drop carries it.
  */
-export function handOffDigest(_mail: Mail): string {
-  throw new Error("not implemented");
+export function handOffDigest(mail: Mail): string {
+  const fields = [mail.id, mail.threadId, mail.inReplyTo, mail.from.agentId, mail.from.name, mail.from.title, mail.from.serverId, mail.to.address, mail.subject, mail.body, mail.createdAt];
+  return createHash("sha256").update(JSON.stringify(fields)).digest("hex");
 }
 
 /** Ids sort in creation order (time, then a counter), so mails sent in the same millisecond list in order. Each matches MAIL_ID. */
@@ -439,7 +440,12 @@ export class Mailer {
     }
   }
 
-  /** Hands one host's outbox mail over in id order. Throws on the first failed call to the host. */
+  /**
+   * Hands one host's outbox mail over in id order. Each mail is recorded on its sending agent
+   * (`paseo-mail.out.<id>`, naming the recipient agent and the drop's digest) before its drop is
+   * written. A mail with no sending agent, or whose sending agent is gone, stays in the outbox
+   * and the pass goes on. Any other failed call to the host throws.
+   */
   private async handOffTo(serverId: string, mails: Mail[], selfServerId: string): Promise<void> {
     let published: PublishedAddress[] | null = null;
     const publisherOf = async (name: string): Promise<string | null> => {
@@ -461,7 +467,26 @@ export class Mailer {
         console.error(`[paseo-mail] mail ${mail.id} to "${mail.to.address}" on ${serverId} reaches no single agent; it stays in the outbox`);
         continue;
       }
-      await this.paseo.writeDrop(serverId, agentId, { ...mail, from: { ...mail.from, serverId: selfServerId } });
+      const senderId = mail.from.agentId;
+      if (senderId === null) {
+        console.error(`[paseo-mail] mail ${mail.id} has no sending agent to record the hand-off on; it stays in the outbox`);
+        continue;
+      }
+      const dropMail = { ...mail, from: { ...mail.from, serverId: selfServerId } };
+      try {
+        await this.paseo.recordHandOff(senderId, mail.id, { to: { serverId, agentId }, digest: handOffDigest(dropMail) });
+      } catch (error) {
+        let senderExists = true;
+        try {
+          senderExists = (await this.paseo.agent(senderId)) !== null;
+        } catch {
+          // The lookup failed too: treat the sender as existing and report the original failure.
+        }
+        if (senderExists) throw error;
+        console.error(`[paseo-mail] mail ${mail.id}: its sending agent ${senderId} no longer exists, so the hand-off cannot be recorded; it stays in the outbox`);
+        continue;
+      }
+      await this.paseo.writeDrop(serverId, agentId, dropMail);
       const handedOffAt = this.now();
       await this.store.update([mail.id], (current) => {
         current.handedOffAt ??= handedOffAt;

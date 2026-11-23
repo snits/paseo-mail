@@ -66,8 +66,8 @@ export class PaseoAdapter implements PaseoPort {
     await (await this.peer(serverId)).agents.ref(agentId).setMetadata({ [DROP_PREFIX + mail.id]: mail as unknown as JsonValue });
   }
 
-  async recordHandOff(_agentId: string, _mailId: string, _record: HandOffRecord): Promise<void> {
-    throw new Error("not implemented");
+  async recordHandOff(agentId: string, mailId: string, record: HandOffRecord): Promise<void> {
+    await this.paseo().agents.ref(agentId).setMetadata({ [OUT_PREFIX + mailId]: record as unknown as JsonValue });
   }
 
   async localDrops(): Promise<Drop[]> {
@@ -158,6 +158,7 @@ export class PaseoAdapter implements PaseoPort {
 
 const ADDRESS_KEY = "paseo-mail.address";
 const DROP_PREFIX = "paseo-mail.in.";
+const OUT_PREFIX = "paseo-mail.out.";
 /** The daemon accepts at most 200 agents per page (@getpaseo/protocol messages.js, fetch_agents page.limit). */
 const PAGE_LIMIT = 200;
 

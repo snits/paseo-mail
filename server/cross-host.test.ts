@@ -59,6 +59,15 @@ function clears(host: FakePaseo): unknown[][] {
   return host.calls.filter((call) => call.op === "clearDrop").map((call) => call.args);
 }
 
+/** A gate that stays closed until `open()` is called. */
+function latch(): { gate: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { gate, open };
+}
+
 /** Parks the host's peerAgent calls until `gate` settles; returns a check that one has parked. */
 function parkLookups(host: FakePaseo, gate: Promise<void>): () => boolean {
   let parked = false;
@@ -596,10 +605,7 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
   it("dispose() waits for an import pass in flight, so nothing is stored or cleared after it resolves", async () => {
     const { mac } = await pairOf();
     place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
-    let open!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      open = resolve;
-    });
+    const { gate, open } = latch();
     const parked = parkLookups(mac.paseo, gate);
     const events: string[] = [];
     const create = mac.store.create.bind(mac.store);
@@ -668,10 +674,7 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
   it("dispose() closes the store only after an import pass in flight has stored its mail", async () => {
     const { mac } = await pairOf();
     place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
-    let open!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      open = resolve;
-    });
+    const { gate, open } = latch();
     const parked = parkLookups(mac.paseo, gate);
     const events: string[] = [];
     const create = mac.store.create.bind(mac.store);
@@ -704,10 +707,7 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
   it.each([true, false])("an import called while dispose() awaits release() makes no peer call, store or clear (disposed: %s)", async (disposing) => {
     const { mac } = await pairOf();
     place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
-    let open!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      open = resolve;
-    });
+    const { gate, open } = latch();
     const release = mac.paseo.release.bind(mac.paseo);
     mac.paseo.release = async () => {
       await gate;

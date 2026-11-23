@@ -725,9 +725,10 @@ describe("two daemons end to end (acceptance 12, 9)", () => {
   });
 
   it.each([
-    { sender: "named", name: "lead" },
-    { sender: "nameless", name: null },
-  ])("mail_reply refuses a $sender sender after its host link is removed", async ({ name }) => {
+    { sender: "named", name: "lead", remaining: "a lookalike link", lookalike: true },
+    { sender: "nameless", name: null, remaining: "a lookalike link", lookalike: true },
+    { sender: "named", name: "lead", remaining: "no links", lookalike: false },
+  ])("mail_reply refuses a $sender sender after removing its host link, leaving $remaining", async ({ name, lookalike }) => {
     const { network, cantor, mac, lead, probe } = await pairOf();
     if (name !== null) await cantor.mailer.register(lead, { name });
     const [delivery] = await cantor.mailer.send(lead, ["probe@m2-max"], "Ping", "Question");
@@ -744,11 +745,15 @@ describe("two daemons end to end (acceptance 12, 9)", () => {
     await mac.mailer.flushOutbox();
     expect(mac.store.outbox()).toEqual([]);
 
-    // The directory changes without a watcher event, and a different host gets a lookalike ID and label.
+    // The link is removed without a watcher event.
     mac.paseo.links.delete(CANTOR);
-    const lookalikeId = CANTOR.toLowerCase();
-    network.host(lookalikeId, "lookalike");
-    network.link(MAC, lookalikeId, { label: CANTOR });
+    if (lookalike) {
+      const lookalikeId = CANTOR.toLowerCase();
+      network.host(lookalikeId, "lookalike");
+      network.link(MAC, lookalikeId, { label: CANTOR });
+    } else {
+      expect((await mac.paseo.hostDirectory()).hosts).toEqual([]);
+    }
     const before = mac.store.revision;
     const unlinked = await reply.execute(input, context);
 

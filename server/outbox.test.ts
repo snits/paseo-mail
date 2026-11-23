@@ -296,6 +296,27 @@ describe("reply to a remote sender (design step 9)", () => {
     expect(cantor.store.outbox().map((mail) => mail.id)).toEqual([delivery.mailId]);
   });
 
+  it("accepts a reply to an archived named sender into the outbox when the directory read throws", async () => {
+    const { cantor, mac, lead } = await linked();
+    mac.paseo.add("probe-id");
+    mac.paseo.archive("probe-id");
+    await cantor.store.create(fromMac("m_in", { agentId: "probe-id", name: "probe", title: "Probe" }));
+    cantor.paseo.hostDirectory = async () => Promise.reject(new Error("directory down"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const delivery = await cantor.mailer.reply(lead, "m_in", "Answer");
+      expect(delivery).toMatchObject({ serverId: MAC, agentId: "probe-id", address: "probe" });
+      expect(cantor.store.outbox()).toMatchObject([
+        { id: delivery.mailId, to: { serverId: MAC, agentId: "probe-id", address: "probe" } },
+      ]);
+      await vi.waitFor(() => {
+        expect(errors.mock.calls).toEqual([["[paseo-mail] handing off the outbox failed:", "directory down"]]);
+      });
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   // design A9: an archived sender with a name is not refused on an online host; the hand-off reaches
   // whoever holds the name there now. Wrong: refusing every archived or missing sender, named or not.
   it("accepts a reply to an archived named sender on an online host, and hands it to the name's holder", async () => {

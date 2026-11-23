@@ -1096,6 +1096,24 @@ describe("importDrops: the claimed sender host confirms the hand-off (paseo-mail
     expect.soft(recordOn(cantor.paseo, "lead-id", "m_720")).toStrictEqual(value);
     expect(mac.store.get("m_721")?.to.agentId).toBe("probe-id");
   });
+
+  // RULING (Jerry, relayed by paseo-mail-lead): the importer ignores unknown fields in a record, so
+  // records stay forward-compatible. lead's record of m_730 matches on to and digest and carries an
+  // extra field. Wrong: a strict record schema (no match: cleared unstored, nobody nudged, the record
+  // left on cantor).
+  it("stores a drop whose matching record carries an unknown field, nudges, and clears the record and the drop", async () => {
+    const { cantor, mac } = await pairOf({ debounceMs: 5 });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    forge(mac.paseo, "probe-id", "m_730", dropped("m_730"));
+    cantor.paseo.setMetadata("lead-id", { [`${OUT_PREFIX}m_730`]: { ...recordOf(dropped("m_730"), MAC, "probe-id"), via: "future" } });
+    await mac.mailer.importDrops();
+    expect.soft(mac.store.get("m_730")?.to.agentId).toBe("probe-id");
+    expect.soft(recordClears(mac.paseo)).toEqual([[CANTOR, "lead-id", "m_730"]]);
+    expect.soft(recordOn(cantor.paseo, "lead-id", "m_730")).toBeUndefined();
+    expect.soft(hasDrop(mac.paseo, "probe-id", "m_730")).toBe(false);
+    expect(await until(() => mac.paseo.sent.length > 0)).toBe(true);
+    expect(mac.paseo.sent).toEqual([{ agentId: "probe-id", text: NUDGE_ONE }]);
+  });
 });
 
 describe("import triggers (design step 8)", () => {

@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ATTIC, CANTOR, DROP_PREFIX, MAC, mailOf, linkedHosts, park, publish, reportHost, setup, setupPair, until, wait, type FakeNetwork, type FakePaseo } from "../test/fixtures";
-import type { Mailer, MailerOptions } from "./mailer";
+import { ATTIC, CANTOR, DROP_PREFIX, MAC, OUT_PREFIX, mailOf, linkedHosts, park, publish, reportHost, setup, setupPair, until, wait, type FakeNetwork, type FakePaseo } from "../test/fixtures";
+import { handOffDigest, type Mailer, type MailerOptions } from "./mailer";
 import { UserError, type Mail } from "./types";
 
 // Task 5 of paseo-mail#xsbz: outbox writers and hand-off (design steps 6, 7, 9 and 11).
@@ -924,5 +925,270 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// paseo-mail#qkf2 Task 1: before each drop write, the hand-off writes a record on the sending agent.
+
+/** The fields a hand-off digest covers, in its order; written out here rather than read from production. */
+function digestFields(mail: Mail): unknown[] {
+  return [mail.id, mail.threadId, mail.inReplyTo, mail.from.agentId, mail.from.name, mail.from.title, mail.from.serverId, mail.to.address, mail.subject, mail.body, mail.createdAt];
+}
+
+const sha256 = (fields: unknown[]): string => createHash("sha256").update(JSON.stringify(fields)).digest("hex");
+
+/** The digest the record of `mail` must carry, computed here. */
+const digestOf = (mail: Mail): string => sha256(digestFields(mail));
+
+/** The recordHandOff calls a port recorded, in order. */
+function records(paseo: FakePaseo): { agentId: unknown; mailId: unknown; record: unknown }[] {
+  return paseo.calls.filter((call) => call.op === "recordHandOff").map((call) => ({ agentId: call.args[0], mailId: call.args[1], record: call.args[2] }));
+}
+
+/** The record and drop writes a port recorded, as [op, mail id], in order. */
+function recordsAndDrops(paseo: FakePaseo): unknown[][] {
+  return paseo.calls
+    .filter((call) => call.op === "recordHandOff" || call.op === "writeDrop")
+    .map((call) => [call.op, call.op === "writeDrop" ? (call.args[2] as Mail).id : call.args[1]]);
+}
+
+/** Every paseo-mail.out.* key on a daemon, as "<agentId> <key>". */
+function outKeys(paseo: FakePaseo): string[] {
+  return [...paseo.metadata].flatMap(([agentId, entries]) => Object.keys(entries).filter((key) => key.startsWith(OUT_PREFIX)).map((key) => `${agentId} ${key}`));
+}
+
+/**
+ * cantor's started Mailer, with "lead-id" live on cantor and "probe" published on the Mac. No mailer
+ * runs on the Mac, so nothing there imports a drop (or, once the importer confirms, clears a record).
+ */
+async function sender() {
+  const { network, cantor, mac } = await unstarted();
+  await cantor.mailer.start();
+  cantor.paseo.add("lead-id", { title: "Lead" });
+  publish(mac, "probe-id", "probe", "Probe");
+  return { network, cantor, mac };
+}
+
+/** The record lead's m_001 to probe-id on the Mac must carry, from outMail's fields and cantor's serverId. */
+function recordOfM001(): { to: { serverId: string; agentId: string }; digest: string } {
+  const drop = outMail("m_001", MAC, "probe-id", "probe@m2-max");
+  return { to: { serverId: MAC, agentId: "probe-id" }, digest: digestOf({ ...drop, from: { ...drop.from, serverId: CANTOR } }) };
+}
+
+describe("hand-off record (paseo-mail#qkf2)", () => {
+  // The stored to.agentId (old-id) is archived on the Mac, so the hand-off re-resolves "Probe" to
+  // probe-id; threadId and inReplyTo differ from the id so no two digest fields share a value.
+  // Wrong: the record on the recipient agent or on the Mac instead of on lead-id on cantor; to.agentId
+  // from mail.to.agentId (old-id); to.serverId as cantor's own serverId; the digest over the outbox
+  // copy (from.serverId null) instead of the drop as written (from.serverId cantor).
+  it("writes paseo-mail.out.<id> on the sending agent: the recipient host, the agent the drop went to, and the digest of the drop", async () => {
+    const { cantor, mac } = await sender();
+    mac.add("old-id");
+    mac.archive("old-id");
+    const stored = mailOf({
+      id: "m_001",
+      threadId: "m_009",
+      inReplyTo: "m_00a",
+      from: { agentId: "lead-id", name: "lead", title: "Lead", serverId: null },
+      to: { agentId: "old-id", address: "Probe@m2-max", serverId: MAC },
+      subject: "Status",
+      body: "All green",
+    });
+    await cantor.store.create(stored);
+    await cantor.mailer.flushOutbox();
+    const expected = { to: { serverId: MAC, agentId: "probe-id" }, digest: digestOf({ ...stored, from: { ...stored.from, serverId: CANTOR } }) };
+    expect(expected.digest).not.toBe(digestOf(stored));
+    expect(records(cantor.paseo)).toStrictEqual([{ agentId: "lead-id", mailId: "m_001", record: expected }]);
+    expect(cantor.paseo.metadata.get("lead-id")?.[`${OUT_PREFIX}m_001`]).toStrictEqual(expected);
+    expect(outKeys(cantor.paseo)).toEqual([`lead-id ${OUT_PREFIX}m_001`]);
+    expect(outKeys(mac)).toEqual([]);
+    // The drop the record describes went to probe-id, stamped with cantor's serverId.
+    expect(writes(cantor.paseo)).toMatchObject([{ serverId: MAC, agentId: "probe-id", mail: { id: "m_001", from: { serverId: CANTOR } } }]);
+    expect(stamped(cantor.store, "m_001")).toBe(true);
+  });
+
+  // The drop write fails. Wrong: the record written after the drop (no record when the drop write
+  // fails); stamping anyway. Positive control: the next pass rewrites the same record, then the drop.
+  it("writes the record before the drop: a failing drop write leaves the record, and the retry rewrites it", async () => {
+    const { network, cantor, mac } = await sender();
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    network.fault(MAC, "writeDrop", true);
+    await cantor.mailer.flushOutbox().catch(() => undefined);
+    const expected = recordOfM001();
+    expect(recordsAndDrops(cantor.paseo)).toEqual([
+      ["recordHandOff", "m_001"],
+      ["writeDrop", "m_001"],
+    ]);
+    expect(cantor.paseo.metadata.get("lead-id")?.[`${OUT_PREFIX}m_001`]).toStrictEqual(expected);
+    expect(stamped(cantor.store, "m_001")).toBe(false);
+    network.fault(MAC, "writeDrop", false);
+    await cantor.mailer.flushOutbox();
+    expect(recordsAndDrops(cantor.paseo)).toEqual([
+      ["recordHandOff", "m_001"],
+      ["writeDrop", "m_001"],
+      ["recordHandOff", "m_001"],
+      ["writeDrop", "m_001"],
+    ]);
+    expect(records(cantor.paseo).map((call) => call.record)).toStrictEqual([expected, expected]);
+    expect(cantor.paseo.metadata.get("lead-id")?.[`${OUT_PREFIX}m_001`]).toStrictEqual(expected);
+    expect(mac.metadata.get("probe-id")?.[`${DROP_PREFIX}m_001`]).toMatchObject({ id: "m_001" });
+    expect(stamped(cantor.store, "m_001")).toBe(true);
+  });
+
+  // The sending agent exists (live, or archived: the daemon still has it), and every record write is
+  // refused. Wrong: writing the drop anyway (a writeDrop call); taking the agent for gone and going on
+  // to m_002 (a second recordHandOff call); stamping. Positive control: with writes accepted again,
+  // the next pass hands both over in order.
+  it.each(["live", "archived"] as const)("a refused record write for a %s sending agent writes no drop and stops the host for the pass", async (state) => {
+    const { cantor } = await sender();
+    if (state === "archived") cantor.paseo.archive("lead-id");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
+    cantor.paseo.failRecords = true;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await cantor.mailer.flushOutbox().catch(() => undefined);
+    } finally {
+      errors.mockRestore();
+    }
+    expect(records(cantor.paseo).map((call) => call.mailId)).toEqual(["m_001"]);
+    expect(writes(cantor.paseo)).toEqual([]);
+    expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001", "m_002"]);
+    cantor.paseo.failRecords = false;
+    await cantor.mailer.flushOutbox();
+    expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_001", "m_002"]);
+    expect(cantor.store.outbox()).toEqual([]);
+  });
+
+  // The daemon refuses a metadata write on an agent it does not have; the fake writes anyway, so the
+  // test refuses exactly the writes on agents cantor does not have, with the same error text as a
+  // refusal on a live agent (no telling the two apart by message). m_001's sender (gone-id) was never
+  // on cantor; m_002 comes after it in id order, from lead-id. Wrong: the refusal stopping the host
+  // (m_002 not handed off); stamping m_001; writing m_001's drop without a record; dropping m_001
+  // from the store; no log. Positive control: m_002, in the same pass.
+  it("a refused record write for a sending agent that no longer exists leaves that mail in the outbox and later mail still goes", async () => {
+    const { cantor, mac } = await sender();
+    await cantor.store.create(mailOf({ id: "m_001", from: { agentId: "gone-id", name: "gone", title: null, serverId: null }, to: { agentId: "probe-id", address: "probe@m2-max", serverId: MAC } }));
+    await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
+    const record = cantor.paseo.recordHandOff.bind(cantor.paseo);
+    cantor.paseo.recordHandOff = async (agentId, mailId, value) => {
+      cantor.paseo.failRecords = !cantor.paseo.agents.has(agentId);
+      return record(agentId, mailId, value);
+    };
+    expect(await cantor.paseo.agent("gone-id")).toBeNull();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let logged: string[];
+    try {
+      await cantor.mailer.flushOutbox();
+      logged = errors.mock.calls.map((call) => call.map(String).join(" "));
+    } finally {
+      errors.mockRestore();
+    }
+    expect(records(cantor.paseo).map((call) => [call.agentId, call.mailId])).toEqual([
+      ["gone-id", "m_001"],
+      ["lead-id", "m_002"],
+    ]);
+    expect(writes(cantor.paseo).map((write) => [write.mail.id, write.agentId])).toEqual([["m_002", "probe-id"]]);
+    expect(mac.metadata.get("probe-id")?.[`${DROP_PREFIX}m_001`]).toBeUndefined();
+    expect(stamped(cantor.store, "m_002")).toBe(true);
+    expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001"]);
+    expect(stamped(cantor.store, "m_001")).toBe(false);
+    expect(logged.some((line) => line.includes("m_001"))).toBe(true);
+  });
+
+  // Wrong: treating an archived sender as gone (looked up first, or after a write that succeeded),
+  // so its mail stays in the outbox with no record.
+  it("hands off an archived sending agent's mail with its record", async () => {
+    const { cantor, mac } = await sender();
+    cantor.paseo.archive("lead-id");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    await cantor.mailer.flushOutbox();
+    expect(records(cantor.paseo)).toStrictEqual([{ agentId: "lead-id", mailId: "m_001", record: recordOfM001() }]);
+    expect(cantor.paseo.metadata.get("lead-id")?.[`${OUT_PREFIX}m_001`]).toStrictEqual(recordOfM001());
+    expect(mac.metadata.get("probe-id")?.[`${DROP_PREFIX}m_001`]).toMatchObject({ id: "m_001" });
+    expect(stamped(cantor.store, "m_001")).toBe(true);
+  });
+
+  // Cannot arise today (senderOf always sets the caller), so the mail is written straight to the
+  // store. Wrong: recordHandOff with a null agent; the drop written without a record; the host stopped
+  // (m_002 not handed off). Positive control: m_002, in the same pass.
+  it("leaves a mail with no sending agent in the outbox, writes nothing for it, and later mail still goes", async () => {
+    const { cantor } = await sender();
+    await cantor.store.create(mailOf({ id: "m_001", from: { agentId: null, name: null, title: null, serverId: null }, to: { agentId: "probe-id", address: "probe@m2-max", serverId: MAC } }));
+    await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await cantor.mailer.flushOutbox();
+    } finally {
+      errors.mockRestore();
+    }
+    expect(records(cantor.paseo).map((call) => call.mailId)).toEqual(["m_002"]);
+    expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_002"]);
+    expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001"]);
+  });
+});
+
+describe("handOffDigest (paseo-mail#qkf2)", () => {
+  // Every kept field has its own value (threadId and inReplyTo differ from the id, from.name from
+  // from.title), and the fields the digest leaves out are set, so leaving one in shows.
+  const MAIL = mailOf({
+    id: "m_7q",
+    threadId: "m_5p",
+    inReplyTo: "m_6r",
+    from: { agentId: "lead-id", name: "lead", title: "Lead Engineer", serverId: CANTOR },
+    to: { agentId: "probe-id", address: "Probe@m2-max", serverId: MAC },
+    subject: "Status report",
+    body: "All green on cantor",
+    createdAt: "2026-11-23T08:15:00.000Z",
+  });
+  const FIELDS = ["m_7q", "m_5p", "m_6r", "lead-id", "lead", "Lead Engineer", CANTOR, "Probe@m2-max", "Status report", "All green on cantor", "2026-11-23T08:15:00.000Z"];
+  const EXPECTED = sha256(FIELDS);
+
+  // Wrong: hashing JSON.stringify(mail); another hash or encoding (sha1, base64, upper-case hex);
+  // subject and body, or from.name and from.title, in the other order.
+  it("is the lower-case hex SHA-256 of JSON.stringify of the kept fields in their fixed order", () => {
+    const swapped = (a: number, b: number) => FIELDS.map((value, index) => (index === a ? FIELDS[b] : index === b ? FIELDS[a] : value));
+    // The fixture tells those orders apart.
+    expect(EXPECTED).not.toBe(sha256(swapped(8, 9)));
+    expect(EXPECTED).not.toBe(sha256(swapped(4, 5)));
+    expect(EXPECTED).not.toBe(createHash("sha256").update(JSON.stringify(MAIL)).digest("hex"));
+    expect(handOffDigest(MAIL)).toBe(EXPECTED);
+    expect(handOffDigest(MAIL)).toMatch(/^[0-9a-f]{64}$/);
+    // Swapping the subject and body values gives the digest of the swapped list.
+    const bodyFirst = { ...MAIL, subject: MAIL.body, body: MAIL.subject };
+    expect(handOffDigest(bodyFirst)).toBe(sha256(swapped(8, 9)));
+    expect(handOffDigest(bodyFirst)).not.toBe(EXPECTED);
+  });
+
+  // Wrong: leaving any kept field out (its change would not show).
+  const changes: [string, (mail: Mail) => Mail][] = [
+    ["id", (mail) => ({ ...mail, id: "m_7z" })],
+    ["threadId", (mail) => ({ ...mail, threadId: "m_5z" })],
+    ["inReplyTo", (mail) => ({ ...mail, inReplyTo: null })],
+    ["from.agentId", (mail) => ({ ...mail, from: { ...mail.from, agentId: "other-id" } })],
+    ["from.name", (mail) => ({ ...mail, from: { ...mail.from, name: null } })],
+    ["from.title", (mail) => ({ ...mail, from: { ...mail.from, title: null } })],
+    ["from.serverId", (mail) => ({ ...mail, from: { ...mail.from, serverId: ATTIC } })],
+    ["to.address", (mail) => ({ ...mail, to: { ...mail.to, address: "probe@m2-max" } })],
+    ["subject", (mail) => ({ ...mail, subject: "Status" })],
+    ["body", (mail) => ({ ...mail, body: "All green" })],
+    ["createdAt", (mail) => ({ ...mail, createdAt: "2026-11-23T08:16:00.000Z" })],
+  ];
+  it.each(changes)("changes when %s changes", (_field, change) => {
+    const changed = change(MAIL);
+    expect(handOffDigest(changed)).toBe(digestOf(changed));
+    expect(handOffDigest(changed)).not.toBe(EXPECTED);
+  });
+
+  // The drop's to.agentId may be stale (the hand-off can re-resolve the holder), and the stamps are
+  // not imported. Wrong: hashing the whole mail, or its values in key order (the reordered copy and
+  // the stamped copy differ).
+  it("ignores to.agentId, to.serverId, the stamps and the key order of the mail object", () => {
+    const withStamps = { ...MAIL, to: { ...MAIL.to, agentId: "other-id", serverId: null }, readAt: "2026-11-23T09:00:00.000Z", nudgedAt: "2026-11-23T09:01:00.000Z", bouncedAt: "2026-11-23T09:02:00.000Z", seenAt: "2026-11-23T09:03:00.000Z", handedOffAt: "2026-11-23T09:04:00.000Z" };
+    const reversed = <T extends object>(value: T): T => Object.fromEntries(Object.entries(value).reverse()) as T;
+    const reordered = reversed({ ...MAIL, from: reversed(MAIL.from), to: reversed(MAIL.to) });
+    expect(JSON.stringify(reordered)).not.toBe(JSON.stringify(MAIL));
+    expect(handOffDigest(withStamps)).toBe(EXPECTED);
+    expect(handOffDigest(reordered)).toBe(EXPECTED);
   });
 });

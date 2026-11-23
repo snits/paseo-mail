@@ -78,6 +78,14 @@ let counter = 0;
  */
 export const MAIL_ID = /^m_[0-9a-z]{1,64}$/;
 
+/**
+ * The digest a hand-off record carries: lowercase hex SHA-256 of the JSON array of the fields the
+ * importer keeps, in a fixed order, taken from the mail exactly as the drop carries it.
+ */
+export function handOffDigest(_mail: Mail): string {
+  throw new Error("not implemented");
+}
+
 /** Ids sort in creation order (time, then a counter), so mails sent in the same millisecond list in order. Each matches MAIL_ID. */
 function newId(): string {
   const stamp = Date.now();

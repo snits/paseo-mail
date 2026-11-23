@@ -276,6 +276,23 @@ describe("PaseoAdapter metadata writes", () => {
     expect(peer.patches).toStrictEqual([{ agentId: "a-remote", patch: { "paseo-mail.in.m_abc": mail } }]);
     expect(local.patches).toEqual([]);
   });
+
+  // paseo-mail#qkf2. A routable peer is registered, so a write through a peer client would show.
+  // Wrong: the drop prefix ("paseo-mail.in.m_77") as the key; agentId and mailId swapped (distinct
+  // literals show it); the bare prefix as the key; a stringified record; extra fields in the value;
+  // writing on the peer named in record.to instead of on this daemon's agent.
+  it("recordHandOff sends { paseo-mail.out.<mailId>: record } on the local agent", async () => {
+    const local = stubDaemon("srv_Self1");
+    const peer = stubDaemon("srv_Peer9", [{ id: "a-remote" }]);
+    local.peers.set("srv_Peer9", peer);
+    const record = { to: { serverId: "srv_Peer9", agentId: "a-remote" }, digest: "4f1c0e9a7b2d3c5e6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6" };
+    await expect(attached(local).recordHandOff("a-local", "m_77", record)).resolves.toBeUndefined();
+    expect(local.patches).toStrictEqual([
+      { agentId: "a-local", patch: { "paseo-mail.out.m_77": { to: { serverId: "srv_Peer9", agentId: "a-remote" }, digest: "4f1c0e9a7b2d3c5e6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6" } } },
+    ]);
+    expect(local.clientCalls).toEqual([]);
+    expect(peer.patches).toEqual([]);
+  });
 });
 
 describe("PaseoAdapter.peerAgent", () => {

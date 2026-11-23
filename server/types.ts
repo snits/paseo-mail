@@ -25,6 +25,16 @@ export const MailSchema = z.object({
 });
 export type Mail = z.infer<typeof MailSchema>;
 
+/**
+ * The record a sending daemon writes on its sending agent (key `paseo-mail.out.<mailId>`) before it
+ * hands a mail off: the recipient host, the agent the drop is written on, and the drop's digest.
+ */
+export const HandOffRecordSchema = z.object({
+  to: z.object({ serverId: z.string(), agentId: z.string() }),
+  digest: z.string(),
+});
+export type HandOffRecord = z.infer<typeof HandOffRecordSchema>;
+
 export const RegistrationSchema = z.object({
   agentId: z.string(),
   name: z.string().nullable(),
@@ -94,6 +104,8 @@ export interface PaseoPort {
   peerAddresses(serverId: string): Promise<PublishedAddress[]>;
   /** Writes key `paseo-mail.in.<mail.id>` on the peer's agent. */
   writeDrop(serverId: string, agentId: string, mail: Mail): Promise<void>;
+  /** Writes key `paseo-mail.out.<mailId>` on this daemon's agent (archived or not); throws when the write is refused. */
+  recordHandOff(agentId: string, mailId: string, record: HandOffRecord): Promise<void>;
   /** `paseo-mail.in.*` keys on every local agent (includeArchived + includeBackground, all pages). */
   localDrops(): Promise<Drop[]>;
   clearDrop(agentId: string, mailId: string): Promise<void>;

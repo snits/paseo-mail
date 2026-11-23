@@ -5,7 +5,7 @@ import path from "node:path";
 import { Mailer, type MailerOptions } from "../server/mailer";
 import { Registry } from "../server/registry";
 import { MailStore } from "../server/store";
-import type { AgentInfo, Caller, Drop, HostDirectoryView, HostEntry, Mail, PaseoPort, PortWatcher, PublishedAddress } from "../server/types";
+import type { AgentInfo, Caller, Drop, HandOffRecord, HostDirectoryView, HostEntry, Mail, PaseoPort, PortWatcher, PublishedAddress } from "../server/types";
 
 type AsyncMethodKey<T> = {
   [K in keyof T]-?: T[K] extends (...args: never[]) => Promise<unknown> ? K : never;
@@ -74,13 +74,14 @@ export type FaultOp = "peerAddresses" | "peerAgent" | "writeDrop";
 
 /** One host-side port call, with its arguments copied at call time. */
 export interface PortCall {
-  op: "hostDirectory" | "publishAddress" | "peerAgent" | "peerAddresses" | "writeDrop" | "localDrops" | "clearDrop" | "watch" | "release";
+  op: "hostDirectory" | "publishAddress" | "peerAgent" | "peerAddresses" | "writeDrop" | "localDrops" | "clearDrop" | "watch" | "release" | "recordHandOff";
   args: unknown[];
 }
 
 /** The plugin's metadata keys, written out here rather than read from production. */
 export const ADDRESS_KEY = "paseo-mail.address";
 export const DROP_PREFIX = "paseo-mail.in.";
+export const OUT_PREFIX = "paseo-mail.out.";
 
 /** The serverIds of the test hosts: cantor, the Mac and the attic. */
 export const CANTOR = "srv_Cantor01";
@@ -109,6 +110,8 @@ export class FakePaseo implements PaseoPort {
   failSends = false;
   /** Makes `publishAddress` throw (after recording the call). */
   failPublish = false;
+  /** Makes `recordHandOff` throw (after recording the call). */
+  failRecords = false;
 
   constructor(
     readonly self: { serverId: string; label: string } = { serverId: "srv_local", label: "local" },
@@ -205,6 +208,13 @@ export class FakePaseo implements PaseoPort {
   async clearDrop(agentId: string, mailId: string): Promise<void> {
     this.record("clearDrop", agentId, mailId);
     this.setMetadata(agentId, { [`${DROP_PREFIX}${mailId}`]: null });
+  }
+
+  /** Like `setMetadata`, writes whether or not the agent was `add`ed. */
+  async recordHandOff(agentId: string, mailId: string, record: HandOffRecord): Promise<void> {
+    this.record("recordHandOff", agentId, mailId, record);
+    if (this.failRecords) throw new Error("metadata write refused");
+    this.setMetadata(agentId, { [`${OUT_PREFIX}${mailId}`]: structuredClone(record) });
   }
 
   watch(watcher: PortWatcher): void {

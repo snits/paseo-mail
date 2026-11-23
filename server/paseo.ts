@@ -1,5 +1,5 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import type { AgentInfo, Drop, HostDirectoryView, Mail, PaseoPort, PortWatcher, PublishedAddress } from "./types";
+import type { AgentInfo, Drop, HandOffRecord, HostDirectoryView, Mail, PaseoPort, PortWatcher, PublishedAddress } from "./types";
 
 /** The daemon API handed to hooks and tools (typed via the SDK). */
 export type PaseoApi = PluginHandlerContext["paseo"];
@@ -64,6 +64,10 @@ export class PaseoAdapter implements PaseoPort {
 
   async writeDrop(serverId: string, agentId: string, mail: Mail): Promise<void> {
     await (await this.peer(serverId)).agents.ref(agentId).setMetadata({ [DROP_PREFIX + mail.id]: mail as unknown as JsonValue });
+  }
+
+  async recordHandOff(_agentId: string, _mailId: string, _record: HandOffRecord): Promise<void> {
+    throw new Error("not implemented");
   }
 
   async localDrops(): Promise<Drop[]> {

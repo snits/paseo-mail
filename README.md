@@ -55,7 +55,9 @@ mail is accepted and waits on the sender's daemon until the host comes back. A b
 another host is at most 32 KiB. Both daemons need paseo-mail 0.3.0 or later: a daemon without
 it publishes no addresses, so its agents cannot be found by name, and it never imports the mail
 handed to it. Both daemons must also link each other in Paseo: a daemon with no link to the
-sender's host drops the mail unstored, and the sender is not told. `role:<role>@host` is planned.
+sender's host drops the mail unstored, and the sender is not told. Before storing a mail, the
+receiving daemon checks with the sender's daemon that it handed off that mail, unchanged, to
+this recipient; a mail the sender's daemon has no record of is dropped unstored. `role:<role>@host` is planned.
 
 ### 3. Deliver
 

@@ -3,7 +3,7 @@ import { AGENT_PREFIX, HostBook, parseAddress, unknownHost, type ParsedAddress }
 import { Queue } from "./files";
 import { normalize, type Registry } from "./registry";
 import { isLocal, type MailStore } from "./store";
-import { MailSchema, UserError, type AgentInfo, type Caller, type Drop, type HostDirectoryView, type HostEntry, type Mail, type PaseoPort, type PublishedAddress, type Registration } from "./types";
+import { HandOffRecordSchema, MailSchema, UserError, type AgentInfo, type Caller, type Drop, type HostDirectoryView, type HostEntry, type Mail, type PaseoPort, type PublishedAddress, type Registration } from "./types";
 
 export interface MailerOptions {
   /** Delay before a nudge after new mail or a turn end, so a burst gives one nudge. */
@@ -516,7 +516,12 @@ export class Mailer {
     }
   }
 
-  /** Stores one drop in the holder's inbox, leaves it for a later pass (park), or clears it unstored. */
+  /**
+   * Stores one drop in the holder's inbox, leaves it for a later pass (park), or clears it unstored.
+   * A drop is stored only when its claimed sender's agent holds a matching hand-off record (naming
+   * this host and the holder, with the digest of this mail); otherwise it is cleared unstored and
+   * nothing is written to the claimed host. After storing, the record is cleared, then the drop.
+   */
   private async importDrop(drop: Drop, directory: HostDirectoryView): Promise<void> {
     const where = `mail ${drop.mailId} on ${drop.agentId}`;
     const parsed = MailSchema.safeParse(drop.value);
@@ -533,11 +538,22 @@ export class Mailer {
       return;
     }
     // Throws when the host cannot be reached: the drop waits (logged by the pass).
-    if ((await this.paseo.peerAgent(serverId, senderId)) === null) return this.discard(drop, `${where} comes from agent ${senderId}, which does not exist on ${serverId}`);
+    const sender = await this.paseo.peerAgent(serverId, senderId);
+    if (sender === null) return this.discard(drop, `${where} comes from agent ${senderId}, which does not exist on ${serverId}`);
+    // The sender confirms the drop: its agent holds a hand-off record for this mail that names this
+    // daemon and this agent and carries the digest of exactly this mail.
+    const record = HandOffRecordSchema.safeParse(sender.handOffs[mail.id]);
+    const confirmed =
+      record.success &&
+      record.data.to.serverId === directory.self.serverId &&
+      record.data.to.agentId === drop.agentId &&
+      record.data.digest === handOffDigest(mail);
     if (this.store.get(mail.id)) {
+      if (confirmed) await this.clearHandOffBestEffort(serverId, senderId, mail.id);
       await this.paseo.clearDrop(drop.agentId, drop.mailId);
       return;
     }
+    if (!confirmed) return this.discard(drop, `${where} claims host ${serverId}, whose agent ${senderId} holds no matching hand-off record`);
     // A create that throws leaves the drop for the next pass (logged by the pass).
     await this.store.create({
       ...mail,
@@ -549,7 +565,17 @@ export class Mailer {
       handedOffAt: null,
     });
     this.schedule(drop.agentId);
+    await this.clearHandOffBestEffort(serverId, senderId, mail.id);
     await this.paseo.clearDrop(drop.agentId, drop.mailId);
+  }
+
+  /** Clears the sender's hand-off record once its mail is stored here; a failure is logged, since the record is only a leftover. */
+  private async clearHandOffBestEffort(serverId: string, senderId: string, mailId: string): Promise<void> {
+    try {
+      await this.paseo.clearHandOff(serverId, senderId, mailId);
+    } catch (error) {
+      console.error(`[paseo-mail] clearing the hand-off record of mail ${mailId} on ${senderId} (${serverId}) failed:`, (error as Error).message);
+    }
   }
 
   /** Clears a drop that can never be imported, without storing it. */

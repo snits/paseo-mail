@@ -109,7 +109,7 @@ export interface PaseoPort {
   writeDrop(serverId: string, agentId: string, mail: Mail): Promise<void>;
   /** Writes key `paseo-mail.out.<mailId>` on this daemon's agent (archived or not); throws when the write is refused. */
   recordHandOff(agentId: string, mailId: string, record: HandOffRecord): Promise<void>;
-  /** Clears key `paseo-mail.out.<mailId>` on the peer's agent; throws when the host cannot be reached or refuses the write. */
+  /** Clears key `paseo-mail.out.<mailId>` on the peer's agent (the sender's hand-off record, once the mail is stored); throws when the host cannot be reached or refuses the write. */
   clearHandOff(serverId: string, agentId: string, mailId: string): Promise<void>;
   /** `paseo-mail.in.*` keys on every local agent (includeArchived + includeBackground, all pages). */
   localDrops(): Promise<Drop[]>;

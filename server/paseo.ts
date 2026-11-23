@@ -47,10 +47,16 @@ export class PaseoAdapter implements PaseoPort {
     await this.paseo().agents.ref(agentId).setMetadata({ [ADDRESS_KEY]: address });
   }
 
-  /** Null when the peer has no such agent; throws when the peer cannot be reached. */
+  /** Null when the peer has no such agent; throws when the peer cannot be reached. The hand-off records come from the same read. */
   async peerAgent(serverId: string, agentId: string): Promise<PeerAgent | null> {
-    const info = agentInfo(await (await this.peer(serverId)).agents.ref(agentId).refresh());
-    return info && { ...info, handOffs: {} };
+    const result = await (await this.peer(serverId)).agents.ref(agentId).refresh();
+    const info = agentInfo(result);
+    if (!info || !result) return null;
+    const handOffs: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(result.agent.metadata ?? {})) {
+      if (key.startsWith(OUT_PREFIX) && value !== null) handOffs[key.slice(OUT_PREFIX.length)] = value;
+    }
+    return { ...info, handOffs };
   }
 
   async peerAddresses(serverId: string): Promise<PublishedAddress[]> {
@@ -71,8 +77,8 @@ export class PaseoAdapter implements PaseoPort {
     await this.paseo().agents.ref(agentId).setMetadata({ [OUT_PREFIX + mailId]: record as unknown as JsonValue });
   }
 
-  async clearHandOff(_serverId: string, _agentId: string, _mailId: string): Promise<void> {
-    throw new Error("not implemented");
+  async clearHandOff(serverId: string, agentId: string, mailId: string): Promise<void> {
+    await (await this.peer(serverId)).agents.ref(agentId).setMetadata({ [OUT_PREFIX + mailId]: null });
   }
 
   async localDrops(): Promise<Drop[]> {

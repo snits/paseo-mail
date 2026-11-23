@@ -774,14 +774,20 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
     await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
     const write = park(cantor.paseo, "writeDrop", { refuseOnRelease: new Error("client closed") });
     held.push(() => write.refuse(new Error("test over")));
-    const pass = quiet(cantor.mailer.flushOutbox());
-    expect(await until(() => write.parked === 1)).toBe(true);
-    const disposed = cantor.mailer.dispose();
-    expect(await Promise.race([disposed.then(() => "resolved"), wait(1000).then(() => "pending")])).toBe("resolved");
-    await pass;
-    expect(stamped(cantor.store, "m_001")).toBe(false);
-    expect(writes(cantor.paseo)).toEqual([]);
-    expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001"]);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const pass = quiet(cantor.mailer.flushOutbox());
+      expect(await until(() => write.parked === 1)).toBe(true);
+      const disposed = cantor.mailer.dispose();
+      expect(await Promise.race([disposed.then(() => "resolved"), wait(1000).then(() => "pending")])).toBe("resolved");
+      await pass;
+      expect(stamped(cantor.store, "m_001")).toBe(false);
+      expect(writes(cantor.paseo)).toEqual([]);
+      expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001"]);
+      expect(errors.mock.calls).toEqual([[`[paseo-mail] handing mail to ${MAC} failed; retrying on the next pass:`, "client closed"]]);
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   // The pass is parked on m_001's write when dispose() runs; the test releases the write. store.close()
@@ -902,7 +908,8 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
       const started = cantor.mailer.start();
       try {
         expect(await until(() => publishing.parked === 1)).toBe(true);
-        await cantor.mailer.dispose();
+        const disposed = cantor.mailer.dispose();
+        expect(await Promise.race([disposed.then(() => "resolved"), wait(1000).then(() => "pending")])).toBe("resolved");
       } finally {
         publishing.open();
         await started;

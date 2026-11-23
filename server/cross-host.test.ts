@@ -609,7 +609,7 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
   // end; in production, the SDK's 60 s request deadline). The failed lookup leaves the drop in place.
   it("dispose() releases the port before it waits, so a parked lookup ends and the pass writes nothing", async () => {
     const { mac } = await pairOf();
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
     const lookup = park(mac.paseo, "peerAgent", { refuseOnRelease: new Error("client closed") });
     try {
@@ -621,6 +621,7 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
       expect(mac.store.get("m_001")).toBeUndefined();
       expect(hasDrop(mac.paseo, "probe-id", "m_001")).toBe(true);
       expect(clears(mac.paseo)).toEqual([]);
+      expect(errors.mock.calls).toEqual([["[paseo-mail] importing mail m_001 on probe-id failed; it stays for the next pass:", "client closed"]]);
     } finally {
       lookup.refuse(new Error("test over"));
     }

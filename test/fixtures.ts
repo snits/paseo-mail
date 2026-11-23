@@ -11,12 +11,62 @@ type AsyncMethodKey<T> = {
   [K in keyof T]-?: T[K] extends (...args: never[]) => Promise<unknown> ? K : never;
 }[keyof T];
 
+type AsyncMethod = (this: object, ...args: unknown[]) => Promise<unknown>;
+
+function replaceAsyncMethod(target: object, method: PropertyKey, replace: (original: AsyncMethod) => AsyncMethod): () => void {
+  const methods = target as Record<PropertyKey, AsyncMethod>;
+  const descriptor = Object.getOwnPropertyDescriptor(target, method);
+  const replacement = replace(methods[method]);
+  methods[method] = replacement;
+  return () => {
+    if (methods[method] !== replacement) return;
+    if (descriptor) Object.defineProperty(target, method, descriptor);
+    else Reflect.deleteProperty(target, method);
+  };
+}
+
+/** Holds calls until settled, optionally capturing their results before they wait. */
 export function park<T extends object>(
-  _target: T,
-  _method: AsyncMethodKey<T>,
-  _options?: { after?: boolean } & (T extends { release(): Promise<void> } ? { refuseOnRelease?: Error } : object),
+  target: T,
+  method: AsyncMethodKey<T>,
+  options?: { after?: boolean; refuseOnRelease?: T extends { release(): Promise<void> } ? Error : never },
 ): { readonly parked: number; open(): void; refuse(error: Error): void } {
-  return { parked: 0, open: () => undefined, refuse: () => undefined };
+  let parked = 0;
+  let settled = false;
+  let settleGate!: (error?: Error) => void;
+  // A refusal is a gate value so cleanup can refuse even when no calls are waiting.
+  const gate = new Promise<Error | undefined>((resolve) => {
+    settleGate = resolve;
+  });
+  const after = options?.after ?? false;
+  const restoreMethod = replaceAsyncMethod(target, method, (original) => async function (...args) {
+    if (settled) return original.apply(this, args);
+    const result = after ? await original.apply(this, args) : undefined;
+    if (!settled) parked += 1;
+    const error = await gate;
+    if (error) throw error;
+    return after ? result : original.apply(this, args);
+  });
+
+  const releaseError = options?.refuseOnRelease;
+  const restoreRelease = releaseError && replaceAsyncMethod(target, "release", (original) => function (...args) {
+    settle(releaseError);
+    return original.apply(this, args);
+  });
+
+  function settle(error?: Error): void {
+    if (settled) return;
+    settled = true;
+    restoreRelease?.();
+    restoreMethod();
+    settleGate(error);
+  }
+
+  return {
+    get parked() { return parked; },
+    open: () => settle(),
+    refuse: settle,
+  };
 }
 
 /** The port operations `FakeNetwork.fault` can make fail against one host. */
@@ -59,12 +109,6 @@ export class FakePaseo implements PaseoPort {
   failSends = false;
   /** Makes `publishAddress` throw (after recording the call). */
   failPublish = false;
-  /** How many `publishAddress` calls have parked behind `holdPublishes` so far. */
-  parkedPublishes = 0;
-  private publishHold: Promise<void> | null = null;
-  /** How many `writeDrop` calls have parked behind `holdWrites` so far. */
-  parkedWrites = 0;
-  private writeHold: Promise<void> | null = null;
 
   constructor(
     readonly self: { serverId: string; label: string } = { serverId: "srv_local", label: "local" },
@@ -114,26 +158,7 @@ export class FakePaseo implements PaseoPort {
     return { self: { ...this.self }, hosts };
   }
 
-  /**
-   * Parks every `publishAddress` (before it records or writes, like a slow daemon) until the
-   * returned function is called; parked calls then land in the order they were made.
-   */
-  holdPublishes(): () => void {
-    let release!: () => void;
-    this.publishHold = new Promise((resolve) => {
-      release = resolve;
-    });
-    return () => {
-      this.publishHold = null;
-      release();
-    };
-  }
-
   async publishAddress(agentId: string, address: { name: string | null; roles: string[] } | null): Promise<void> {
-    if (this.publishHold) {
-      this.parkedPublishes += 1;
-      await this.publishHold;
-    }
     this.record("publishAddress", agentId, address);
     if (this.failPublish) throw new Error("publishAddress failed");
     this.setMetadata(agentId, { [ADDRESS_KEY]: address === null ? null : structuredClone(address) });
@@ -158,26 +183,7 @@ export class FakePaseo implements PaseoPort {
     return result;
   }
 
-  /**
-   * Parks every `writeDrop` (before it records or writes, like a slow peer) until the returned
-   * function is called; parked calls then land in the order they were made.
-   */
-  holdWrites(): () => void {
-    let release!: () => void;
-    this.writeHold = new Promise((resolve) => {
-      release = resolve;
-    });
-    return () => {
-      this.writeHold = null;
-      release();
-    };
-  }
-
   async writeDrop(serverId: string, agentId: string, mail: Mail): Promise<void> {
-    if (this.writeHold) {
-      this.parkedWrites += 1;
-      await this.writeHold;
-    }
     this.record("writeDrop", serverId, agentId, mail);
     const peer = this.peer(serverId, "writeDrop");
     if (!peer.agents.has(agentId)) throw new Error(`agent ${agentId} does not exist on ${serverId}`);

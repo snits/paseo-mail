@@ -7,6 +7,18 @@ import { Registry } from "../server/registry";
 import { MailStore } from "../server/store";
 import type { AgentInfo, Caller, Drop, HostDirectoryView, HostEntry, Mail, PaseoPort, PortWatcher, PublishedAddress } from "../server/types";
 
+type AsyncMethodKey<T> = {
+  [K in keyof T]-?: T[K] extends (...args: never[]) => Promise<unknown> ? K : never;
+}[keyof T];
+
+export function park<T extends object>(
+  _target: T,
+  _method: AsyncMethodKey<T>,
+  _options?: { after?: boolean } & (T extends { release(): Promise<void> } ? { refuseOnRelease?: Error } : object),
+): { readonly parked: number; open(): void; refuse(error: Error): void } {
+  return { parked: 0, open: () => undefined, refuse: () => undefined };
+}
+
 /** The port operations `FakeNetwork.fault` can make fail against one host. */
 export type FaultOp = "peerAddresses" | "peerAgent" | "writeDrop";
 

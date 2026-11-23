@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { CANTOR, FakeNetwork, MAC, mailOf, publish, setup, setupPair, type FakePaseo } from "../test/fixtures";
+import { CANTOR, FakeNetwork, MAC, mailOf, park, publish, setup, setupPair, until, type FakePaseo } from "../test/fixtures";
 import { HostBook } from "./address";
 import { nudgeText, type Mailer } from "./mailer";
 import { UserError, type Mail } from "./types";
@@ -377,6 +377,31 @@ describe("idle nudge", () => {
     await wait();
     expect(second.paseo.sent).toEqual([{ agentId: "b", text: nudgeText(1) }]);
   });
+
+  // Wrong: scheduling held nudges after the registry backfill, so a slow publish delays the nudge.
+  it("nudges held mail on restart while the registry backfill is parked", async () => {
+    const first = await setup({ debounceMs: 60_000 });
+    current = first.mailer;
+    const alice = first.paseo.add("a");
+    await first.mailer.register(first.paseo.add("b"), { name: "bob" });
+    await first.mailer.send(alice, ["bob"], "s", "b");
+    await first.mailer.dispose();
+    expect(first.paseo.sent).toEqual([]);
+
+    const second = await setup({ debounceMs: 5 }, first.root);
+    current = second.mailer;
+    second.paseo.add("b");
+    const publishing = park(second.paseo, "publishAddress");
+    const started = second.mailer.start();
+    try {
+      expect(await until(() => publishing.parked === 1)).toBe(true);
+      await until(() => second.paseo.sent.length > 0);
+      expect(second.paseo.sent).toEqual([{ agentId: "b", text: "[paseo-mail] You have 1 unread mail. Call mail_list to see them." }]);
+    } finally {
+      publishing.open();
+      await started;
+    }
+  });
 });
 
 describe("outbox mail", () => {
@@ -553,12 +578,18 @@ describe("publishing paseo-mail.address (design step 4)", () => {
     await env.registry.set({ agentId: "a-abel", name: "abel", roles: [], workspaceId: null, projectId: null, updatedAt: "2026-11-22T10:00:00.000Z" });
     await env.registry.set({ agentId: "a-xena", name: "alice", roles: ["qa"], workspaceId: null, projectId: null, updatedAt: "2026-11-22T10:00:00.000Z" });
     expect(env.registry.list().map((entry) => entry.agentId)).toEqual(["a-abel", "a-xena"]);
-    const release = env.paseo.holdPublishes();
+    const publishing = park(env.paseo, "publishAddress");
     const started = env.mailer.start();
-    const registered = env.mailer.register(xena, input);
-    for (let tries = 0; env.paseo.parkedPublishes < 2 && tries < 100; tries += 1) await wait(10);
-    release();
-    await Promise.all([started, registered]);
+    try {
+      expect(await until(() => publishing.parked === 1)).toBe(true);
+      const registered = env.mailer.register(xena, input);
+      await until(() => publishing.parked >= 2);
+      publishing.open();
+      await Promise.all([started, registered]);
+    } finally {
+      publishing.open();
+      await started;
+    }
     const xenaPublishes = published(env.paseo).filter(([agentId]) => agentId === "a-xena");
     const settled = env.registry.get("a-xena");
     expect(settled === undefined ? null : { name: settled.name, roles: settled.roles }).toEqual(final);

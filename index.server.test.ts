@@ -5,25 +5,46 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import contribute from "./index.server";
 import { Mailer } from "./server/mailer";
 import { MAIL_NOTE } from "./server/system-prompt";
-import { tempDir } from "./test/fixtures";
+import { park, tempDir, until, wait } from "./test/fixtures";
 
 type Handler = (payload: unknown, context: unknown) => Promise<unknown>;
 
 /** A daemon API with idle agents, recording the messages sent to them and the metadata patches. */
 function fakeApi(sent: { id: string; text: string }[], patches: { id: string; patch: unknown }[] = []) {
   const agent = (id: string) => ({ id, title: id.toUpperCase(), workspaceId: "w1", status: "idle", archivedAt: null });
+  const makeRef = (id: string) => ({
+    refresh: async () => ({ agent: agent(id), project: null }),
+    send: async (text: string) => {
+      sent.push({ id, text });
+    },
+    setMetadata: async (patch: unknown) => {
+      patches.push({ id, patch });
+    },
+  });
+  const refs = new Map<string, ReturnType<typeof makeRef>>();
+  const directory = { self: { serverId: "srv_local", label: "local" }, hosts: [] };
+  const subscription = <T>(snapshot: T) => ({
+    subscribe(observer: { snapshot(value: T): void }) {
+      observer.snapshot(snapshot);
+    },
+    release: async () => undefined,
+  });
   return {
     agents: {
-      ref: (id: string) => ({
-        refresh: async () => ({ agent: agent(id), project: null }),
-        send: async (text: string) => {
-          sent.push({ id, text });
-        },
-        setMetadata: async (patch: unknown) => {
-          patches.push({ id, patch });
-        },
-      }),
+      ref(id: string) {
+        let ref = refs.get(id);
+        if (!ref) {
+          ref = makeRef(id);
+          refs.set(id, ref);
+        }
+        return ref;
+      },
+      async list(options: { subscribe?: object }) {
+        const page = { entries: [], pageInfo: { hasMore: false, nextCursor: null, prevCursor: null } };
+        return options.subscribe ? { ...page, subscription: subscription(page) } : page;
+      },
     },
+    hosts: { list: async () => directory, observe: () => subscription(directory) },
     workspaces: { ref: () => ({ refresh: async () => ({ projectId: "p1" }) }) },
   };
 }
@@ -113,6 +134,38 @@ describe("contribute", () => {
     await hooks.get("agent.turn.before")!({ agent: { id: "b" }, turnId: null }, context);
     await vi.waitFor(() => expect(patches).toEqual([{ id: "a-carol", patch: { "paseo-mail.address": { name: "carol", roles: ["ops"] } } }]));
     await cleanup();
+  });
+
+  // Wrong: awaiting start() in the first hook, so a slow backfill prevents tools from loading.
+  it("returns mail tools from the first interactive open while the registry backfill is parked", async () => {
+    const dataDir = path.join(process.env.PASEO_HOME!, "plugin-data", "lerenn", "mail");
+    await mkdir(dataDir, { recursive: true });
+    const stored = [{ agentId: "a-carol", name: "carol", roles: ["ops"], workspaceId: "w1", projectId: "p1", updatedAt: "2026-11-22T10:00:00.000Z" }];
+    await writeFile(path.join(dataDir, "registry.json"), `${JSON.stringify(stored, null, 2)}\n`);
+    const hooks = new Map<string, Handler>();
+    const server = { addHook: (name: string, handler: Handler) => (hooks.set(name, handler), () => hooks.delete(name)), handle: () => undefined } as unknown as PluginServerContext;
+    const patches: { id: string; patch: unknown }[] = [];
+    const context = { paseo: fakeApi([], patches), signal: new AbortController().signal };
+    const publishing = park(context.paseo.agents.ref("a-carol"), "setMetadata");
+    const start = vi.spyOn(Mailer.prototype, "start");
+    const cleanup = contribute(server) as () => Promise<void>;
+    const request = { agentId: "b", workspaceId: "w1", provider: "claude", cwd: "/tmp", reason: "create", purpose: "interactive", title: null, labels: {}, tools: [], env: {}, mcpServers: {} };
+    const opened = hooks.get("agent.open.before")!({ request }, context) as Promise<{ tools: { name: string }[] }>;
+    try {
+      expect(await until(() => publishing.parked === 1)).toBe(true);
+      const result = await Promise.race([opened, wait(1000).then(() => undefined)]);
+      expect(result?.tools.map((tool) => tool.name)).toEqual(["mail_register", "mail_directory", "mail_send", "mail_list", "mail_read", "mail_reply"]);
+      expect(patches).toEqual([]);
+      publishing.open();
+      await start.mock.results[0]!.value;
+      expect(patches).toEqual([{ id: "a-carol", patch: { "paseo-mail.address": { name: "carol", roles: ["ops"] } } }]);
+    } finally {
+      publishing.open();
+      await Promise.allSettled([opened]);
+      await Promise.allSettled(start.mock.results.map((result) => result.value));
+      start.mockRestore();
+      await cleanup();
+    }
   });
 
   // Task 6 of paseo-mail#xsbz (design step 8): every turn end runs an import pass, whether the hook

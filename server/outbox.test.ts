@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ATTIC, CANTOR, DROP_PREFIX, MAC, mailOf, linkedHosts, publish, reportHost, setup, setupPair, until, wait, type FakeNetwork, type FakePaseo } from "../test/fixtures";
+import { ATTIC, CANTOR, DROP_PREFIX, MAC, mailOf, linkedHosts, park, publish, reportHost, setup, setupPair, until, wait, type FakeNetwork, type FakePaseo } from "../test/fixtures";
 import type { Mailer, MailerOptions } from "./mailer";
 import { UserError, type Mail } from "./types";
 
@@ -372,13 +372,13 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     const { cantor, mac } = await linked();
     publish(mac.paseo, "probe-id", "probe");
     await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
-    const release = cantor.paseo.holdWrites();
-    held.push(release);
+    const write = park(cantor.paseo, "writeDrop");
+    held.push(write.open);
     const flush = quiet(cantor.mailer.flushOutbox());
-    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    expect(await until(() => write.parked >= 1)).toBe(true);
     await wait(20);
     expect(stamped(cantor.store, "m_001")).toBe(false);
-    release();
+    write.open();
     await flush;
     expect(stamped(cantor.store, "m_001")).toBe(true);
   });
@@ -568,15 +568,15 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     const { cantor, mac } = await linked();
     publish(mac.paseo, "probe-id", "probe");
     await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
-    const release = cantor.paseo.holdWrites();
-    held.push(release);
+    const write = park(cantor.paseo, "writeDrop");
+    held.push(write.open);
     const first = quiet(cantor.mailer.flushOutbox());
-    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    expect(await until(() => write.parked >= 1)).toBe(true);
     const second = quiet(cantor.mailer.flushOutbox());
-    await until(() => cantor.paseo.parkedWrites >= 2, 200);
-    release();
+    await until(() => write.parked >= 2, 200);
+    write.open();
     await Promise.all([first, second]);
-    expect(cantor.paseo.parkedWrites).toBe(1);
+    expect(write.parked).toBe(1);
     expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_001"]);
     expect(stamped(cantor.store, "m_001")).toBe(true);
   });
@@ -587,13 +587,13 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     const { cantor, mac } = await linked();
     publish(mac.paseo, "probe-id", "probe");
     await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
-    const release = cantor.paseo.holdWrites();
-    held.push(release);
+    const write = park(cantor.paseo, "writeDrop");
+    held.push(write.open);
     const first = quiet(cantor.mailer.flushOutbox());
-    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    expect(await until(() => write.parked >= 1)).toBe(true);
     await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
     const second = quiet(cantor.mailer.flushOutbox());
-    release();
+    write.open();
     await second;
     await first;
     expect(stamped(cantor.store, "m_002")).toBe(true);
@@ -609,14 +609,14 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     publish(mac.paseo, "probe-id", "probe");
     publish(mac.paseo, "other-id", "other");
     await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
-    const release = cantor.paseo.holdWrites();
-    held.push(release);
+    const write = park(cantor.paseo, "writeDrop");
+    held.push(write.open);
     const first = quiet(cantor.mailer.flushOutbox());
-    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    expect(await until(() => write.parked >= 1)).toBe(true);
     await cantor.store.create(outMail("m_002", MAC, "other-id", "other@m2-max"));
     const second = quiet(cantor.mailer.flushOutbox());
     const disposed = disposing ? cantor.mailer.dispose() : Promise.resolve();
-    release();
+    write.open();
     await Promise.allSettled([first, second]);
     await disposed;
     const aboutOther = peerCalls(cantor.paseo).filter(([, , agentId]) => agentId === "other-id");
@@ -648,13 +648,13 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
   it("a send starts a flush without awaiting it", async () => {
     const { cantor, mac, lead } = await linked();
     publish(mac.paseo, "probe-id", "probe");
-    const release = cantor.paseo.holdWrites();
-    held.push(release);
+    const write = park(cantor.paseo, "writeDrop");
+    held.push(write.open);
     const sent = quiet(cantor.mailer.send(lead, ["probe@m2-max"], "s", "b"));
     expect(await Promise.race([sent.then(() => "resolved"), wait(500).then(() => "pending")])).toBe("resolved");
-    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    expect(await until(() => write.parked >= 1)).toBe(true);
     const [delivery] = await sent;
-    release();
+    write.open();
     expect(await until(() => stamped(cantor.store, delivery!.mailId))).toBe(true);
   });
 
@@ -663,13 +663,13 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
     const { cantor, mac, lead } = await linked();
     publish(mac.paseo, "probe-id", "probe");
     await cantor.store.create(fromMac("m_in", { agentId: "probe-id", name: "probe", title: null }));
-    const release = cantor.paseo.holdWrites();
-    held.push(release);
+    const write = park(cantor.paseo, "writeDrop");
+    held.push(write.open);
     const replied = quiet(cantor.mailer.reply(lead, "m_in", "Answer"));
     expect(await Promise.race([replied.then(() => "resolved"), wait(500).then(() => "pending")])).toBe("resolved");
-    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    expect(await until(() => write.parked >= 1)).toBe(true);
     const delivery = await replied;
-    release();
+    write.open();
     expect(await until(() => stamped(cantor.store, delivery.mailId))).toBe(true);
   });
 
@@ -750,49 +750,32 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
       events.push("update");
       return update(ids, change);
     };
-    const release = cantor.paseo.holdWrites();
-    held.push(release);
+    const write = park(cantor.paseo, "writeDrop");
+    held.push(write.open);
     const pass = quiet(cantor.mailer.flushOutbox());
-    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    expect(await until(() => write.parked >= 1)).toBe(true);
     const disposed = cantor.mailer.dispose().then(() => {
       events.push("disposed");
     });
     expect(await Promise.race([disposed.then(() => "resolved"), wait(100).then(() => "pending")])).toBe("pending");
-    release();
+    write.open();
     expect(await Promise.race([disposed.then(() => "resolved"), wait(1000).then(() => "pending")])).toBe("resolved");
     await pass;
     expect(events).toEqual(["update", "disposed"]);
   });
 
   // The pass is parked on m_001's write behind a gate that only release() settles: it rejects the
-  // call, as the SDK rejects a closed client's calls in flight. holdWrites() can only resolve, so the
-  // gate is the test's own; the test never opens it. Wrong: dispose() awaiting the queues before
-  // release() (it waits on a call only release() can end; in production, the SDK's 60 s request
-  // deadline). The failed write leaves m_001 in the outbox.
+  // call, as the SDK rejects a closed client's calls in flight. Wrong: dispose() awaiting the queues
+  // before release() (it waits on a call only release() can end; in production, the SDK's 60 s
+  // request deadline). The failed write leaves m_001 in the outbox.
   it("dispose() releases the port before it waits, so a parked write ends and nothing is stamped", async () => {
     const { cantor, mac } = await linked();
     publish(mac.paseo, "probe-id", "probe");
     await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
-    let refuse!: (error: Error) => void;
-    const gate = new Promise<void>((_resolve, reject) => {
-      refuse = reject;
-    });
-    gate.catch(() => undefined);
-    held.push(() => refuse(new Error("test over")));
-    let parked = false;
-    const write = cantor.paseo.writeDrop.bind(cantor.paseo);
-    cantor.paseo.writeDrop = async (serverId, agentId, mail) => {
-      parked = true;
-      await gate;
-      return write(serverId, agentId, mail);
-    };
-    const release = cantor.paseo.release.bind(cantor.paseo);
-    cantor.paseo.release = async () => {
-      refuse(new Error("client closed"));
-      await release();
-    };
+    const write = park(cantor.paseo, "writeDrop", { refuseOnRelease: new Error("client closed") });
+    held.push(() => write.refuse(new Error("test over")));
     const pass = quiet(cantor.mailer.flushOutbox());
-    expect(await until(() => parked)).toBe(true);
+    expect(await until(() => write.parked === 1)).toBe(true);
     const disposed = cantor.mailer.dispose();
     expect(await Promise.race([disposed.then(() => "resolved"), wait(1000).then(() => "pending")])).toBe("resolved");
     await pass;
@@ -820,12 +803,12 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
       events.push("close");
       return close();
     };
-    const release = cantor.paseo.holdWrites();
-    held.push(release);
+    const write = park(cantor.paseo, "writeDrop");
+    held.push(write.open);
     const pass = quiet(cantor.mailer.flushOutbox());
-    expect(await until(() => cantor.paseo.parkedWrites >= 1)).toBe(true);
+    expect(await until(() => write.parked >= 1)).toBe(true);
     const disposed = cantor.mailer.dispose();
-    release();
+    write.open();
     await pass;
     await disposed;
     expect(events).toEqual(["update", "close"]);
@@ -839,16 +822,8 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
     const { cantor, mac } = await linked();
     publish(mac.paseo, "probe-id", "probe");
     await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
-    let open!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      open = resolve;
-    });
-    held.push(open);
-    const release = cantor.paseo.release.bind(cantor.paseo);
-    cantor.paseo.release = async () => {
-      await gate;
-      await release();
-    };
+    const releasing = park(cantor.paseo, "release");
+    held.push(releasing.open);
     const updates: string[][] = [];
     const update = cantor.store.update.bind(cantor.store);
     cantor.store.update = (ids, change) => {
@@ -857,9 +832,10 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
     };
     const mark = cantor.paseo.calls.length;
     const disposed = disposing ? cantor.mailer.dispose() : Promise.resolve();
+    if (disposing) expect(await until(() => releasing.parked === 1)).toBe(true);
     const flushed = quiet(cantor.mailer.flushOutbox());
     expect(await Promise.race([flushed.then(() => "settled", () => "settled"), wait(1000).then(() => "pending")])).toBe("settled");
-    open();
+    releasing.open();
     await disposed;
     const ops = cantor.paseo.calls.slice(mark).map((call) => call.op).filter((op) => PEER_OPS.has(op));
     if (disposing) {
@@ -922,13 +898,15 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
     try {
       const { cantor } = await unstarted({ sweepMs: 20 });
       await cantor.registry.set({ agentId: "a-carol", name: "carol", roles: [], workspaceId: null, projectId: null, updatedAt: "2026-11-22T10:00:00.000Z" });
-      const release = cantor.paseo.holdPublishes();
-      held.push(release);
+      const publishing = park(cantor.paseo, "publishAddress");
       const started = cantor.mailer.start();
-      expect(await until(() => cantor.paseo.parkedPublishes >= 1)).toBe(true);
-      await cantor.mailer.dispose();
-      release();
-      await started;
+      try {
+        expect(await until(() => publishing.parked === 1)).toBe(true);
+        await cantor.mailer.dispose();
+      } finally {
+        publishing.open();
+        await started;
+      }
       expect(cantor.paseo.calls.map((call) => call.op)).not.toContain("watch");
       expect(vi.getTimerCount()).toBe(0);
       // Positive control: a start() nobody disposes watches the port and arms one sweep.

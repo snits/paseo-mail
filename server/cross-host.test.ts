@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ATTIC, CANTOR, DROP_PREFIX, MAC, linkedHosts, mailOf, reportHost, setup, setupPair, toolContext, until, wait, type Env, type FakeNetwork, type FakePaseo } from "../test/fixtures";
+import { ATTIC, CANTOR, DROP_PREFIX, MAC, linkedHosts, mailOf, park, reportHost, setup, setupPair, toolContext, until, wait, type Env, type FakeNetwork, type FakePaseo } from "../test/fixtures";
 import type { Mailer, MailerOptions } from "./mailer";
 import { mailTools } from "./tools";
 import type { Mail } from "./types";
@@ -57,27 +57,6 @@ function hasDrop(host: FakePaseo, agentId: string, mailId: string): boolean {
 /** The clearDrop calls the port recorded, as [agentId, mailId]. */
 function clears(host: FakePaseo): unknown[][] {
   return host.calls.filter((call) => call.op === "clearDrop").map((call) => call.args);
-}
-
-/** A gate that stays closed until `open()` is called. */
-function latch(): { gate: Promise<void>; open: () => void } {
-  let open!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    open = resolve;
-  });
-  return { gate, open };
-}
-
-/** Parks the host's peerAgent calls until `gate` settles; returns a check that one has parked. */
-function parkLookups(host: FakePaseo, gate: Promise<void>): () => boolean {
-  let parked = false;
-  const lookup = host.peerAgent.bind(host);
-  host.peerAgent = async (serverId, agentId) => {
-    parked = true;
-    await gate;
-    return lookup(serverId, agentId);
-  };
-  return () => parked;
 }
 
 describe("importDrops: accept (design step 8)", () => {
@@ -571,27 +550,18 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     const { cantor, mac } = await pairOf();
     cantor.paseo.add("lead2-id");
     place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
-    let release!: () => void;
-    const hold = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let parked = false;
-    const list = mac.paseo.localDrops.bind(mac.paseo);
-    mac.paseo.localDrops = async () => {
-      const drops = await list();
-      if (!parked) {
-        parked = true;
-        await hold;
-      }
-      return drops;
-    };
+    const listing = park(mac.paseo, "localDrops", { after: true });
     const first = mac.mailer.importDrops().catch(() => undefined);
-    expect(await until(() => parked)).toBe(true);
-    place(mac.paseo, "probe-id", "m_002", { ...dropped("m_002"), from: { agentId: "lead2-id", name: "lead2", title: null, serverId: CANTOR } });
-    const second = mac.mailer.importDrops().catch(() => undefined);
-    const disposed = disposing ? mac.mailer.dispose() : Promise.resolve();
-    release();
-    await Promise.all([first, second, disposed]);
+    try {
+      expect(await until(() => listing.parked === 1)).toBe(true);
+      place(mac.paseo, "probe-id", "m_002", { ...dropped("m_002"), from: { agentId: "lead2-id", name: "lead2", title: null, serverId: CANTOR } });
+      const second = mac.mailer.importDrops().catch(() => undefined);
+      const disposed = disposing ? mac.mailer.dispose() : Promise.resolve();
+      listing.open();
+      await Promise.all([first, second, disposed]);
+    } finally {
+      listing.open();
+    }
     const aboutM002 = mac.paseo.calls.filter((call) => (call.op === "peerAgent" && call.args[1] === "lead2-id") || (call.op === "clearDrop" && call.args[1] === "m_002"));
     if (disposing) expect(aboutM002).toEqual([]);
     else expect(aboutM002.map((call) => call.op)).toEqual(["peerAgent", "clearDrop"]);
@@ -605,8 +575,7 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
   it("dispose() waits for an import pass in flight, so nothing is stored or cleared after it resolves", async () => {
     const { mac } = await pairOf();
     place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
-    const { gate, open } = latch();
-    const parked = parkLookups(mac.paseo, gate);
+    const lookup = park(mac.paseo, "peerAgent");
     const events: string[] = [];
     const create = mac.store.create.bind(mac.store);
     mac.store.create = (mail) => {
@@ -620,17 +589,17 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     };
     try {
       const pass = mac.mailer.importDrops().catch(() => undefined);
-      expect(await until(parked)).toBe(true);
+      expect(await until(() => lookup.parked === 1)).toBe(true);
       const disposed = mac.mailer.dispose().then(() => {
         events.push("disposed");
       });
       expect(await Promise.race([disposed.then(() => "resolved"), wait(100).then(() => "pending")])).toBe("pending");
-      open();
+      lookup.open();
       expect(await Promise.race([disposed.then(() => "resolved"), wait(1000).then(() => "pending")])).toBe("resolved");
       await pass;
       expect(events).toEqual(["create", "clear", "disposed"]);
     } finally {
-      open();
+      lookup.open();
     }
   });
 
@@ -642,20 +611,10 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     const { mac } = await pairOf();
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
-    let refuse!: (error: Error) => void;
-    const gate = new Promise<void>((_resolve, reject) => {
-      refuse = reject;
-    });
-    gate.catch(() => undefined);
-    const parked = parkLookups(mac.paseo, gate);
-    const release = mac.paseo.release.bind(mac.paseo);
-    mac.paseo.release = async () => {
-      refuse(new Error("client closed"));
-      await release();
-    };
+    const lookup = park(mac.paseo, "peerAgent", { refuseOnRelease: new Error("client closed") });
     try {
       const pass = mac.mailer.importDrops().catch(() => undefined);
-      expect(await until(parked)).toBe(true);
+      expect(await until(() => lookup.parked === 1)).toBe(true);
       const disposed = mac.mailer.dispose();
       expect(await Promise.race([disposed.then(() => "resolved"), wait(1000).then(() => "pending")])).toBe("resolved");
       await pass;
@@ -663,7 +622,7 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
       expect(hasDrop(mac.paseo, "probe-id", "m_001")).toBe(true);
       expect(clears(mac.paseo)).toEqual([]);
     } finally {
-      refuse(new Error("test over"));
+      lookup.refuse(new Error("test over"));
     }
   });
 
@@ -674,8 +633,7 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
   it("dispose() closes the store only after an import pass in flight has stored its mail", async () => {
     const { mac } = await pairOf();
     place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
-    const { gate, open } = latch();
-    const parked = parkLookups(mac.paseo, gate);
+    const lookup = park(mac.paseo, "peerAgent");
     const events: string[] = [];
     const create = mac.store.create.bind(mac.store);
     mac.store.create = (mail) => {
@@ -689,14 +647,14 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     };
     try {
       const pass = mac.mailer.importDrops().catch(() => undefined);
-      expect(await until(parked)).toBe(true);
+      expect(await until(() => lookup.parked === 1)).toBe(true);
       const disposed = mac.mailer.dispose();
-      open();
+      lookup.open();
       await pass;
       await disposed;
       expect(events).toEqual(["create", "close"]);
     } finally {
-      open();
+      lookup.open();
     }
   });
 
@@ -707,12 +665,7 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
   it.each([true, false])("an import called while dispose() awaits release() makes no peer call, store or clear (disposed: %s)", async (disposing) => {
     const { mac } = await pairOf();
     place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
-    const { gate, open } = latch();
-    const release = mac.paseo.release.bind(mac.paseo);
-    mac.paseo.release = async () => {
-      await gate;
-      await release();
-    };
+    const releasing = park(mac.paseo, "release");
     const creates: string[] = [];
     const create = mac.store.create.bind(mac.store);
     mac.store.create = (mail) => {
@@ -722,9 +675,10 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     const mark = mac.paseo.calls.length;
     try {
       const disposed = disposing ? mac.mailer.dispose() : Promise.resolve();
+      if (disposing) expect(await until(() => releasing.parked === 1)).toBe(true);
       const imported = mac.mailer.importDrops().catch(() => undefined);
       expect(await Promise.race([imported.then(() => "settled"), wait(1000).then(() => "pending")])).toBe("settled");
-      open();
+      releasing.open();
       await disposed;
       const ops = mac.paseo.calls
         .slice(mark)
@@ -738,7 +692,7 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
         expect(creates).toEqual(["m_001"]);
       }
     } finally {
-      open();
+      releasing.open();
     }
   });
 
@@ -749,20 +703,20 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     const { mac } = await pairOf();
     await mac.store.create(mailOf({ id: "m_050", from: { agentId: "probe-id", name: "probe", title: "Probe", serverId: null }, to: { agentId: "lead-id", address: "lead@cantor", serverId: CANTOR } }));
     place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
-    const release = mac.paseo.holdWrites();
+    const write = park(mac.paseo, "writeDrop");
     try {
       const handOff = mac.mailer.flushOutbox().catch(() => undefined);
-      expect(await until(() => mac.paseo.parkedWrites >= 1)).toBe(true);
+      expect(await until(() => write.parked === 1)).toBe(true);
       const imported = mac.mailer.importDrops().catch(() => undefined);
       expect(await Promise.race([imported.then(() => "settled"), wait(1000).then(() => "pending")])).toBe("settled");
       expect(mac.store.get("m_100")?.to.agentId).toBe("probe-id");
       expect(hasDrop(mac.paseo, "probe-id", "m_100")).toBe(false);
       expect(mac.store.get("m_050")?.handedOffAt).toBeNull();
-      release();
+      write.open();
       await handOff;
       expect(mac.store.get("m_050")?.handedOffAt).not.toBeNull();
     } finally {
-      release();
+      write.open();
     }
   });
 });

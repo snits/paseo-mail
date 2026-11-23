@@ -25,7 +25,8 @@ snapshot `refresh()` returns carries it, for live and for archived agents (@getp
 ## Decision
 
 This adds to the **Hand-off** and **Importer** rules of `2026-11-21-cross-host-delivery.md`, as
-`2026-11-21-cross-host-slice-1-rules.md` does. Nothing else in either ADR is superseded.
+`2026-11-21-cross-host-slice-1-rules.md` does. It supersedes one rule there: the importer's
+accept criterion (last bullet below). Nothing else in either ADR is superseded.
 
 - **Hand-off record.** Before writing a drop, the sending daemon writes a record on its own
   sending agent (`from.agentId`), under the flat metadata key `paseo-mail.out.<mailId>`:
@@ -33,7 +34,8 @@ This adds to the **Hand-off** and **Importer** rules of `2026-11-21-cross-host-d
   - `to` names the recipient host and the agent the drop is written on.
   - `digest` is the lowercase hex SHA-256 of `JSON.stringify` of `[id, threadId, inReplyTo,
     from.agentId, from.name, from.title, from.serverId, to.address, subject, body, createdAt]`,
-    taken from the mail as the drop carries it. These are the fields the importer keeps. Without
+    taken from the mail as the drop carries it. These are the fields the importer reads from the
+    drop (it rewrites `to.address` to its local part, and sets `to` and the stamps itself). Without
     them, a host that can read the drop could overwrite its content under the genuine id.
   - The record is written, then the drop, then `handedOffAt` is stamped. A failed record write
     stops hand-offs to that host for the pass, as a failed drop write does, unless the sending
@@ -56,7 +58,7 @@ This adds to the **Hand-off** and **Importer** rules of `2026-11-21-cross-host-d
      clear the drop.
   - Clearing the record is best-effort: a failure is logged and the drop is still cleared.
   - Only a matching record is ever cleared, so a forged drop cannot remove a genuine one's record.
-- The delivery ADR's accept criterion therefore becomes: the mail parses, `from.serverId` is a
+- **Supersedes** the delivery ADR's accept criterion, which becomes: the mail parses, `from.serverId` is a
   linked host, the claimed sender exists there, **and it holds a matching record**.
 
 ## Consequences
@@ -66,9 +68,11 @@ This adds to the **Hand-off** and **Importer** rules of `2026-11-21-cross-host-d
   `workspace.write` on the claimed sender's host can write a record there and a drop here. The
   check stops a forger that is linked to the recipient's host but not to the claimed sender's.
 - **Rejected carrier.** Plugin timeline items are stamped with the writing plugin's id by the
-  server (@getpaseo/server `session.js:6474-6483`), so a peer probably cannot forge one. They are
-  permanent, shown in the sending agent's timeline (one per mail, never cleared), and need a
-  timeline fetch per drop, so this ADR does not use them.
+  server (@getpaseo/server `session.js:6474-6483`), so a peer probably cannot forge one. But the
+  client's timeline handle can only append, refetch and subscribe (@getpaseo/client
+  `dist/index.d.ts:278-297`): an item, one per mail, would stay in the sending agent's timeline
+  with no way for the plugin to remove it, and confirming would need a timeline fetch per drop. So
+  this ADR does not use them.
 - **Cost per mail.** The sender adds one local metadata write. The importer adds no peer read and
   one peer write, the record clear. A host that reads online but never answers can hold that
   write for up to 60 s (@getpaseo/client `daemon-client.js:184`; kata paseo-mail#252j), and the

@@ -310,6 +310,32 @@ describe("PaseoAdapter metadata writes", () => {
     await expect(attached(local).recordHandOff("a-gone", "m_77", record)).rejects.toThrow("agent a-gone not found");
     expect(local.patches.map((entry) => entry.agentId)).toEqual(["a-gone"]);
   });
+
+  // paseo-mail#qkf2. Two routable peers hold an a-remote. Wrong: writing on the local daemon (the record
+  // lives on the sender's host) or through another peer's client; the drop prefix; agentId and mailId
+  // swapped (distinct literals show it); a value other than null.
+  it("clearHandOff sends { paseo-mail.out.<mailId>: null } on the peer's agent", async () => {
+    const local = stubDaemon("srv_Self1");
+    const peer = stubDaemon("srv_Peer9", [{ id: "a-remote" }]);
+    const other = stubDaemon("srv_Peer7", [{ id: "a-remote" }]);
+    local.peers.set("srv_Peer9", peer);
+    local.peers.set("srv_Peer7", other);
+    await expect(attached(local).clearHandOff("srv_Peer9", "a-remote", "m_77")).resolves.toBeUndefined();
+    expect(local.clientCalls).toEqual(["srv_Peer9"]);
+    expect(peer.patches).toStrictEqual([{ agentId: "a-remote", patch: { "paseo-mail.out.m_77": null } }]);
+    expect({ local: local.patches, other: other.patches }).toEqual({ local: [], other: [] });
+  });
+
+  // The importer logs a refused record clear, so it must see it. Wrong: swallowing the peer's refusal
+  // (resolves); replacing it with an error of its own. Positive control: the patch was attempted.
+  it("clearHandOff rejects with the peer's error when the write is refused", async () => {
+    const local = stubDaemon("srv_Self1");
+    const peer = stubDaemon("srv_Peer9", [{ id: "a-remote" }]);
+    local.peers.set("srv_Peer9", peer);
+    peer.refuseMetadata(new Error("workspace.write denied"));
+    await expect(attached(local).clearHandOff("srv_Peer9", "a-remote", "m_77")).rejects.toThrow("workspace.write denied");
+    expect(peer.patches.map((entry) => entry.agentId)).toEqual(["a-remote"]);
+  });
 });
 
 describe("PaseoAdapter.peerAgent", () => {
@@ -323,9 +349,44 @@ describe("PaseoAdapter.peerAgent", () => {
   // Positive control: an archived agent is found (not folded into null); a missing one is null.
   it("returns the agent when found (archived too) and null when refresh() resolves null", async () => {
     const { peer, adapter } = pair([{ id: "a-remote", title: "Remote", archived: true }]);
-    expect(await adapter.peerAgent("srv_Peer9", "a-remote")).toEqual({ id: "a-remote", title: "Remote", workspaceId: null, status: "idle", archived: true });
+    expect(await adapter.peerAgent("srv_Peer9", "a-remote")).toEqual({ id: "a-remote", title: "Remote", workspaceId: null, status: "idle", archived: true, handOffs: {} });
     expect(await adapter.peerAgent("srv_Peer9", "a-gone")).toBeNull();
     expect(peer.refreshed).toEqual(["a-remote", "a-gone"]);
+  });
+
+  // paseo-mail#qkf2. The archived a-remote holds two records (one whose value is no record: the
+  // adapter passes values through raw), a cleared one (null), a drop, its address, another plugin's
+  // key and "paseo-mail.outbox" (no dot after "out"). Wrong: no handOffs; "paseo-mail.out" without its
+  // dot as the prefix (outbox kept) or "paseo-mail." (address and drop kept); keeping the null;
+  // keeping the prefix in the mail id; parsing or filtering the values; a second read of the peer
+  // (a list call, or a second refresh); reading the local daemon.
+  it("returns the agent's hand-off records by mail id, from the same refresh", async () => {
+    const record = { to: { serverId: "srv_Self1", agentId: "a-local" }, digest: "9a0b1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f" };
+    const { local, peer, adapter } = pair([
+      {
+        id: "a-remote",
+        title: "Remote",
+        archived: true,
+        metadata: {
+          "paseo-mail.out.m_1": record,
+          "paseo-mail.out.m_2": "not a record",
+          "paseo-mail.out.m_3": null,
+          "paseo-mail.in.m_4": { subject: "x" },
+          "paseo-mail.address": { name: "remote", roles: [] },
+          "other.plugin.out.m_5": 5,
+          "paseo-mail.outbox": 6,
+        },
+      },
+    ]);
+    expect(await adapter.peerAgent("srv_Peer9", "a-remote")).toStrictEqual({
+      id: "a-remote",
+      title: "Remote",
+      workspaceId: null,
+      status: "idle",
+      archived: true,
+      handOffs: { m_1: { to: { serverId: "srv_Self1", agentId: "a-local" }, digest: "9a0b1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f" }, m_2: "not a record" },
+    });
+    expect({ refreshed: peer.refreshed, listed: peer.listCalls.length, local: local.refreshed }).toEqual({ refreshed: ["a-remote"], listed: 0, local: [] });
   });
 
   // Wrong: `.catch(() => null)` folds an unreachable host into "missing", which would clear a drop that should park.
@@ -607,6 +668,7 @@ describe("PaseoAdapter.release", () => {
       await expect(adapter.peerAgent(serverId, "a-remote")).rejects.toThrow();
       await expect(adapter.peerAddresses(serverId)).rejects.toThrow();
       await expect(adapter.writeDrop(serverId, "a-remote", mail)).rejects.toThrow();
+      await expect(adapter.clearHandOff(serverId, "a-remote", "m_77")).rejects.toThrow();
     }
     expect(local.clientCalls).toEqual(["srv_Peer9"]);
     expect({ peerA: peerA.patches, peerB: peerB.patches }).toEqual({ peerA: [], peerB: [] });

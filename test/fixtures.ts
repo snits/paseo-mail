@@ -5,7 +5,7 @@ import path from "node:path";
 import { Mailer, type MailerOptions } from "../server/mailer";
 import { Registry } from "../server/registry";
 import { MailStore } from "../server/store";
-import type { AgentInfo, Caller, Drop, HandOffRecord, HostDirectoryView, HostEntry, Mail, PaseoPort, PortWatcher, PublishedAddress } from "../server/types";
+import type { AgentInfo, Caller, Drop, HandOffRecord, HostDirectoryView, HostEntry, Mail, PaseoPort, PeerAgent, PortWatcher, PublishedAddress } from "../server/types";
 
 type AsyncMethodKey<T> = {
   [K in keyof T]-?: T[K] extends (...args: never[]) => Promise<unknown> ? K : never;
@@ -70,11 +70,11 @@ export function park<T extends object>(
 }
 
 /** The port operations `FakeNetwork.fault` can make fail against one host. */
-export type FaultOp = "peerAddresses" | "peerAgent" | "writeDrop";
+export type FaultOp = "peerAddresses" | "peerAgent" | "writeDrop" | "clearHandOff";
 
 /** One host-side port call, with its arguments copied at call time. */
 export interface PortCall {
-  op: "hostDirectory" | "publishAddress" | "peerAgent" | "peerAddresses" | "writeDrop" | "localDrops" | "clearDrop" | "watch" | "release" | "recordHandOff";
+  op: "hostDirectory" | "publishAddress" | "peerAgent" | "peerAddresses" | "writeDrop" | "localDrops" | "clearDrop" | "watch" | "release" | "recordHandOff" | "clearHandOff";
   args: unknown[];
 }
 
@@ -167,9 +167,17 @@ export class FakePaseo implements PaseoPort {
     this.setMetadata(agentId, { [ADDRESS_KEY]: address === null ? null : structuredClone(address) });
   }
 
-  async peerAgent(serverId: string, agentId: string): Promise<AgentInfo | null> {
+  /** The peer's agent with `handOffs`: every non-null `paseo-mail.out.*` key in its metadata, by mail id. */
+  async peerAgent(serverId: string, agentId: string): Promise<PeerAgent | null> {
     this.record("peerAgent", serverId, agentId);
-    return this.peer(serverId, "peerAgent").agent(agentId);
+    const peer = this.peer(serverId, "peerAgent");
+    const agent = await peer.agent(agentId);
+    if (!agent) return null;
+    const handOffs: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(peer.metadata.get(agentId) ?? {})) {
+      if (key.startsWith(OUT_PREFIX) && value !== null) handOffs[key.slice(OUT_PREFIX.length)] = structuredClone(value);
+    }
+    return { ...agent, handOffs };
   }
 
   async peerAddresses(serverId: string): Promise<PublishedAddress[]> {
@@ -215,6 +223,12 @@ export class FakePaseo implements PaseoPort {
     this.record("recordHandOff", agentId, mailId, record);
     if (this.failRecords) throw new Error("metadata write refused");
     this.setMetadata(agentId, { [`${OUT_PREFIX}${mailId}`]: structuredClone(record) });
+  }
+
+  /** Reaches the peer like `writeDrop` (recorded first, so a faulted call still shows) and removes the key there, whether or not the agent exists. */
+  async clearHandOff(serverId: string, agentId: string, mailId: string): Promise<void> {
+    this.record("clearHandOff", serverId, agentId, mailId);
+    this.peer(serverId, "clearHandOff").setMetadata(agentId, { [`${OUT_PREFIX}${mailId}`]: null });
   }
 
   watch(watcher: PortWatcher): void {

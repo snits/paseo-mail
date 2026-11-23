@@ -1,5 +1,5 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import type { AgentInfo, Drop, HandOffRecord, HostDirectoryView, Mail, PaseoPort, PortWatcher, PublishedAddress } from "./types";
+import type { AgentInfo, Drop, HandOffRecord, HostDirectoryView, Mail, PaseoPort, PeerAgent, PortWatcher, PublishedAddress } from "./types";
 
 /** The daemon API handed to hooks and tools (typed via the SDK). */
 export type PaseoApi = PluginHandlerContext["paseo"];
@@ -48,8 +48,9 @@ export class PaseoAdapter implements PaseoPort {
   }
 
   /** Null when the peer has no such agent; throws when the peer cannot be reached. */
-  async peerAgent(serverId: string, agentId: string): Promise<AgentInfo | null> {
-    return agentInfo(await (await this.peer(serverId)).agents.ref(agentId).refresh());
+  async peerAgent(serverId: string, agentId: string): Promise<PeerAgent | null> {
+    const info = agentInfo(await (await this.peer(serverId)).agents.ref(agentId).refresh());
+    return info && { ...info, handOffs: {} };
   }
 
   async peerAddresses(serverId: string): Promise<PublishedAddress[]> {
@@ -68,6 +69,10 @@ export class PaseoAdapter implements PaseoPort {
 
   async recordHandOff(agentId: string, mailId: string, record: HandOffRecord): Promise<void> {
     await this.paseo().agents.ref(agentId).setMetadata({ [OUT_PREFIX + mailId]: record as unknown as JsonValue });
+  }
+
+  async clearHandOff(_serverId: string, _agentId: string, _mailId: string): Promise<void> {
+    throw new Error("not implemented");
   }
 
   async localDrops(): Promise<Drop[]> {

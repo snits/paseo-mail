@@ -54,6 +54,9 @@ export interface AgentInfo {
   archived: boolean;
 }
 
+/** An agent on a peer daemon, with its hand-off records: mailId → the raw value of each non-null `paseo-mail.out.<mailId>` key. */
+export type PeerAgent = AgentInfo & { handOffs: Record<string, unknown> };
+
 /** A linked host as this daemon's directory lists it. */
 export interface HostEntry {
   serverId: string;
@@ -97,8 +100,8 @@ export interface PaseoPort {
   send(agentId: string, text: string): Promise<void>;
   hostDirectory(): Promise<HostDirectoryView>;
   publishAddress(agentId: string, address: { name: string | null; roles: string[] } | null): Promise<void>;
-  /** Found (archived or not) or null when missing; THROWS when the host cannot be reached. */
-  peerAgent(serverId: string, agentId: string): Promise<AgentInfo | null>;
+  /** Found (archived or not), with its hand-off records from the same read, or null when missing; THROWS when the host cannot be reached. */
+  peerAgent(serverId: string, agentId: string): Promise<PeerAgent | null>;
   /** Every page of the peer's non-archived agents (filter.includeBackground: true) that publish
    *  `paseo-mail.address` with a name. Throws when unreachable. */
   peerAddresses(serverId: string): Promise<PublishedAddress[]>;
@@ -106,6 +109,8 @@ export interface PaseoPort {
   writeDrop(serverId: string, agentId: string, mail: Mail): Promise<void>;
   /** Writes key `paseo-mail.out.<mailId>` on this daemon's agent (archived or not); throws when the write is refused. */
   recordHandOff(agentId: string, mailId: string, record: HandOffRecord): Promise<void>;
+  /** Clears key `paseo-mail.out.<mailId>` on the peer's agent; throws when the host cannot be reached or refuses the write. */
+  clearHandOff(serverId: string, agentId: string, mailId: string): Promise<void>;
   /** `paseo-mail.in.*` keys on every local agent (includeArchived + includeBackground, all pages). */
   localDrops(): Promise<Drop[]>;
   clearDrop(agentId: string, mailId: string): Promise<void>;

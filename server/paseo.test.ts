@@ -94,6 +94,8 @@ function stubDaemon(serverId: string, agents: StubAgent[] = []) {
   /** The last non-empty page still carries a cursor (hasMore false); the page past the end has none. */
   let cursorOnLastPage = false;
   const dispose = vi.fn(async () => {});
+  /** When set, every `setMetadata` rejects with it (after recording the patch), as the daemon refuses a write. */
+  let metadataFailure: Error | null = null;
 
   function page(options: ListOptions = {}) {
     const { signal: _signal, ...recorded } = options as ListOptions & { signal?: unknown };
@@ -138,6 +140,7 @@ function stubDaemon(serverId: string, agents: StubAgent[] = []) {
           },
           async setMetadata(patch: Record<string, unknown>) {
             patches.push({ agentId: id, patch: structuredClone(patch) });
+            if (metadataFailure) throw metadataFailure;
           },
           async send() {},
         };
@@ -175,6 +178,9 @@ function stubDaemon(serverId: string, agents: StubAgent[] = []) {
     dispose,
     setDirectory(next: Directory) {
       directory = next;
+    },
+    refuseMetadata(error: Error) {
+      metadataFailure = error;
     },
     keepCursorOnLastPage() {
       cursorOnLastPage = true;
@@ -292,6 +298,17 @@ describe("PaseoAdapter metadata writes", () => {
     ]);
     expect(local.clientCalls).toEqual([]);
     expect(peer.patches).toEqual([]);
+  });
+
+  // The hand-off tells "sender gone" from other failures only by a write that rejects. Wrong:
+  // swallowing the daemon's refusal (resolves); replacing it with an error of its own. Positive
+  // control: the patch was attempted.
+  it("recordHandOff rejects with the daemon's error when the write is refused", async () => {
+    const local = stubDaemon("srv_Self1");
+    local.refuseMetadata(new Error("agent a-gone not found"));
+    const record = { to: { serverId: "srv_Peer9", agentId: "a-remote" }, digest: "4f1c0e9a7b2d3c5e6f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6" };
+    await expect(attached(local).recordHandOff("a-gone", "m_77", record)).rejects.toThrow("agent a-gone not found");
+    expect(local.patches.map((entry) => entry.agentId)).toEqual(["a-gone"]);
   });
 });
 

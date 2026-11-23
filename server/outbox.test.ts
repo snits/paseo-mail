@@ -957,6 +957,17 @@ function outKeys(paseo: FakePaseo): string[] {
   return [...paseo.metadata].flatMap(([agentId, entries]) => Object.keys(entries).filter((key) => key.startsWith(OUT_PREFIX)).map((key) => `${agentId} ${key}`));
 }
 
+/** Runs `action` with console.error silenced; returns each line it logged, its arguments joined by spaces. */
+async function logged(action: () => Promise<unknown>): Promise<string[]> {
+  const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  try {
+    await action();
+    return errors.mock.calls.map((call) => call.map(String).join(" "));
+  } finally {
+    errors.mockRestore();
+  }
+}
+
 /**
  * cantor's started Mailer, with "lead-id" live on cantor and "probe" published on the Mac. No mailer
  * runs on the Mac, so nothing there imports a drop (or, once the importer confirms, clears a record).
@@ -1037,20 +1048,17 @@ describe("hand-off record (paseo-mail#qkf2)", () => {
 
   // The sending agent exists (live, or archived: the daemon still has it), and every record write is
   // refused. Wrong: writing the drop anyway (a writeDrop call); taking the agent for gone and going on
-  // to m_002 (a second recordHandOff call); stamping. Positive control: with writes accepted again,
-  // the next pass hands both over in order.
+  // to m_002 (a second recordHandOff call); stamping; stopping the host without reporting the refusal
+  // (no log line naming the Mac and the refusal). Positive control: with writes accepted again, the
+  // next pass hands both over in order.
   it.each(["live", "archived"] as const)("a refused record write for a %s sending agent writes no drop and stops the host for the pass", async (state) => {
     const { cantor } = await sender();
     if (state === "archived") cantor.paseo.archive("lead-id");
     await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
     await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
     cantor.paseo.failRecords = true;
-    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    try {
-      await cantor.mailer.flushOutbox().catch(() => undefined);
-    } finally {
-      errors.mockRestore();
-    }
+    const lines = await logged(() => cantor.mailer.flushOutbox().catch(() => undefined));
+    expect(lines.some((line) => line.includes(MAC) && line.includes("metadata write refused"))).toBe(true);
     expect(records(cantor.paseo).map((call) => call.mailId)).toEqual(["m_001"]);
     expect(writes(cantor.paseo)).toEqual([]);
     expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001", "m_002"]);
@@ -1111,20 +1119,66 @@ describe("hand-off record (paseo-mail#qkf2)", () => {
 
   // Cannot arise today (senderOf always sets the caller), so the mail is written straight to the
   // store. Wrong: recordHandOff with a null agent; the drop written without a record; the host stopped
-  // (m_002 not handed off). Positive control: m_002, in the same pass.
+  // (m_002 not handed off); skipping it silently (no log line naming m_001). Positive control: m_002,
+  // in the same pass.
   it("leaves a mail with no sending agent in the outbox, writes nothing for it, and later mail still goes", async () => {
     const { cantor } = await sender();
     await cantor.store.create(mailOf({ id: "m_001", from: { agentId: null, name: null, title: null, serverId: null }, to: { agentId: "probe-id", address: "probe@m2-max", serverId: MAC } }));
     await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
-    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    try {
-      await cantor.mailer.flushOutbox();
-    } finally {
-      errors.mockRestore();
-    }
+    const lines = await logged(() => cantor.mailer.flushOutbox());
     expect(records(cantor.paseo).map((call) => call.mailId)).toEqual(["m_002"]);
     expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_002"]);
     expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001"]);
+    expect(lines.some((line) => line.includes("m_001"))).toBe(true);
+  });
+
+  // m_001 is for "ghost", which nobody on the Mac publishes; m_002 is for probe. Wrong: recording the
+  // hand-off before the recipient is resolved (a record for m_001 that no drop will ever match).
+  // Positive control: m_002's record.
+  it("writes no record for a mail that reaches no single agent", async () => {
+    const { cantor } = await sender();
+    await cantor.store.create(outMail("m_001", MAC, null, "ghost@m2-max"));
+    await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
+    await logged(() => cantor.mailer.flushOutbox());
+    expect(records(cantor.paseo).map((call) => call.mailId)).toEqual(["m_002"]);
+    expect(outKeys(cantor.paseo)).toEqual([`lead-id ${OUT_PREFIX}m_002`]);
+    expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001"]);
+  });
+
+  // The record write succeeds (the fake does not check the agent) but the drop write fails, and the
+  // sending agent is one cantor does not have. A failed drop write is a failure of the host, whoever
+  // sent the mail. Wrong: reading the failed drop write as "sender gone" (the lookup says null) and
+  // going on to m_002 in the same pass. Positive control: the failure is logged against the Mac.
+  it("a failed drop write stops the host for the pass even when the sending agent is gone", async () => {
+    const { network, cantor } = await sender();
+    await cantor.store.create(mailOf({ id: "m_001", from: { agentId: "gone-id", name: "gone", title: null, serverId: null }, to: { agentId: "probe-id", address: "probe@m2-max", serverId: MAC } }));
+    await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
+    network.fault(MAC, "writeDrop", true);
+    expect(await cantor.paseo.agent("gone-id")).toBeNull();
+    const lines = await logged(() => cantor.mailer.flushOutbox().catch(() => undefined));
+    expect(recordsAndDrops(cantor.paseo)).toEqual([
+      ["recordHandOff", "m_001"],
+      ["writeDrop", "m_001"],
+    ]);
+    expect(lines.some((line) => line.includes(MAC) && line.includes("writeDrop against"))).toBe(true);
+    expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001", "m_002"]);
+  });
+
+  // Every record write is refused and the sender lookup itself throws, so whether lead-id exists is
+  // unknown. Wrong: reading the throw as "gone" (m_001 skipped, m_002's record attempted); reporting
+  // the lookup's error instead of the refusal. Positive control: the refusal is logged against the Mac.
+  it("a refused record write whose sender lookup throws stops the host and reports the refusal", async () => {
+    const { cantor } = await sender();
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
+    cantor.paseo.failRecords = true;
+    cantor.paseo.agent = async () => Promise.reject(new Error("agent lookup failed"));
+    const lines = await logged(() => cantor.mailer.flushOutbox().catch(() => undefined));
+    expect(records(cantor.paseo).map((call) => call.mailId)).toEqual(["m_001"]);
+    expect(writes(cantor.paseo)).toEqual([]);
+    expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001", "m_002"]);
+    expect(lines.some((line) => line.includes(MAC) && line.includes("metadata write refused"))).toBe(true);
+    expect(lines.filter((line) => line.includes("agent lookup failed"))).toEqual([]);
   });
 });
 

@@ -1,8 +1,9 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ATTIC, CANTOR, DROP_PREFIX, MAC, linkedHosts, mailOf, reportHost, setup, setupPair, until, wait, type Env, type FakeNetwork, type FakePaseo } from "../test/fixtures";
+import { ATTIC, CANTOR, DROP_PREFIX, MAC, linkedHosts, mailOf, reportHost, setup, setupPair, toolContext, until, wait, type Env, type FakeNetwork, type FakePaseo } from "../test/fixtures";
 import type { Mailer, MailerOptions } from "./mailer";
+import { mailTools } from "./tools";
 import type { Mail } from "./types";
 
 // Task 6 of paseo-mail#xsbz: the importer (design step 8) and the two-daemon end-to-end cases
@@ -721,5 +722,39 @@ describe("two daemons end to end (acceptance 12, 9)", () => {
       from: { agentId: "probe-id", name: "probe", serverId: MAC },
       to: { agentId: "Anon-ID", address: "agent:Anon-ID", serverId: null },
     });
+  });
+
+  it.each([
+    { sender: "named", name: "lead" },
+    { sender: "nameless", name: null },
+  ])("mail_reply refuses a $sender sender after its host link is removed", async ({ name }) => {
+    const { network, cantor, mac, lead, probe } = await pairOf();
+    if (name !== null) await cantor.mailer.register(lead, { name });
+    const [delivery] = await cantor.mailer.send(lead, ["probe@m2-max"], "Ping", "Question");
+    const id = delivery!.mailId;
+    expect(await until(() => mac.store.get(id) !== undefined)).toBe(true);
+    expect(mac.store.get(id)?.from).toMatchObject({ agentId: lead.id, name, serverId: CANTOR });
+
+    const reply = mailTools(mac.mailer).find((tool) => tool.name === "mail_reply")!;
+    const input = reply.input.parse({ id, body: "Answer" });
+    const context = toolContext(probe.id, probe.title);
+    const linked = await reply.execute(input, context);
+    expect(linked.isError).toBeUndefined();
+    expect(await until(() => cantor.mailer.list(lead.id).some((mail) => mail.inReplyTo === id))).toBe(true);
+    await mac.mailer.flushOutbox();
+    expect(mac.store.outbox()).toEqual([]);
+
+    // The directory changes without a watcher event, and a different host gets a lookalike ID and label.
+    mac.paseo.links.delete(CANTOR);
+    const lookalikeId = CANTOR.toLowerCase();
+    network.host(lookalikeId, "lookalike");
+    network.link(MAC, lookalikeId, { label: CANTOR });
+    const before = mac.store.revision;
+    const unlinked = await reply.execute(input, context);
+
+    expect.soft(unlinked.isError).toBe(true);
+    expect.soft(unlinked.text).toContain(`unknown host "${CANTOR}"`);
+    expect.soft(mac.store.revision).toBe(before);
+    expect.soft(mac.store.outbox()).toEqual([]);
   });
 });

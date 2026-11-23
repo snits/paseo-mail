@@ -696,6 +696,51 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
       open();
     }
   });
+
+  // release() is parked on a test gate (the port's real release() waits for the peer clients to
+  // close), and an import is called meanwhile with a valid drop waiting. Wrong: dispose() marking
+  // itself disposed only after release() resolves (the pass starts, looks up the sender, stores
+  // m_001 and clears the drop). Positive control: the same import without dispose() does all three.
+  it.each([true, false])("an import called while dispose() awaits release() makes no peer call, store or clear (disposed: %s)", async (disposing) => {
+    const { mac } = await pairOf();
+    place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const release = mac.paseo.release.bind(mac.paseo);
+    mac.paseo.release = async () => {
+      await gate;
+      await release();
+    };
+    const creates: string[] = [];
+    const create = mac.store.create.bind(mac.store);
+    mac.store.create = (mail) => {
+      creates.push(mail.id);
+      return create(mail);
+    };
+    const mark = mac.paseo.calls.length;
+    try {
+      const disposed = disposing ? mac.mailer.dispose() : Promise.resolve();
+      const imported = mac.mailer.importDrops().catch(() => undefined);
+      expect(await Promise.race([imported.then(() => "settled"), wait(1000).then(() => "pending")])).toBe("settled");
+      open();
+      await disposed;
+      const ops = mac.paseo.calls
+        .slice(mark)
+        .map((call) => call.op)
+        .filter((op) => op === "peerAgent" || op === "clearDrop");
+      if (disposing) {
+        expect(ops).toEqual([]);
+        expect(creates).toEqual([]);
+      } else {
+        expect(ops).toEqual(["peerAgent", "clearDrop"]);
+        expect(creates).toEqual(["m_001"]);
+      }
+    } finally {
+      open();
+    }
+  });
 });
 
 describe("import triggers (design step 8)", () => {

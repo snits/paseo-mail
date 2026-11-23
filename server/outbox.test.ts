@@ -831,6 +831,46 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
     expect(events).toEqual(["update", "close"]);
   });
 
+  // release() is parked on a test gate (the port's real release() waits for the peer clients to
+  // close), and a flush is called meanwhile with m_001 in the outbox for an online host. Wrong:
+  // dispose() marking itself disposed only after release() resolves (the pass starts, writes the
+  // drop and stamps m_001). Positive control: the same flush without dispose() writes and stamps.
+  it.each([true, false])("a flush called while dispose() awaits release() makes no peer call or stamp (disposed: %s)", async (disposing) => {
+    const { cantor, mac } = await linked();
+    publish(mac.paseo, "probe-id", "probe");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    held.push(open);
+    const release = cantor.paseo.release.bind(cantor.paseo);
+    cantor.paseo.release = async () => {
+      await gate;
+      await release();
+    };
+    const updates: string[][] = [];
+    const update = cantor.store.update.bind(cantor.store);
+    cantor.store.update = (ids, change) => {
+      updates.push(ids);
+      return update(ids, change);
+    };
+    const mark = cantor.paseo.calls.length;
+    const disposed = disposing ? cantor.mailer.dispose() : Promise.resolve();
+    const flushed = quiet(cantor.mailer.flushOutbox());
+    expect(await Promise.race([flushed.then(() => "settled", () => "settled"), wait(1000).then(() => "pending")])).toBe("settled");
+    open();
+    await disposed;
+    const ops = cantor.paseo.calls.slice(mark).map((call) => call.op).filter((op) => PEER_OPS.has(op));
+    if (disposing) {
+      expect(ops).toEqual([]);
+      expect(updates).toEqual([]);
+    } else {
+      expect(ops).toEqual(["peerAgent", "writeDrop"]);
+      expect(updates).toEqual([["m_001"]]);
+    }
+  });
+
   // Only setInterval is faked, so the 59 s mark is reached without waiting. Wrong: any other default
   // (1 s fires before the 59 s check; 120 s has not fired at 60 s). The expected 60 s is written here.
   it("the sweep runs every 60 s by default", async () => {

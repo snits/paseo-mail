@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { AGENT_PREFIX, HostBook, parseAddress, type ParsedAddress } from "./address";
+import { AGENT_PREFIX, HostBook, parseAddress, unknownHost, type ParsedAddress } from "./address";
 import { Queue } from "./files";
 import { normalize, type Registry } from "./registry";
 import { isLocal, type MailStore } from "./store";
-import { MailSchema, UserError, type AgentInfo, type Caller, type Drop, type HostDirectoryView, type Mail, type PaseoPort, type PublishedAddress, type Registration } from "./types";
+import { MailSchema, UserError, type AgentInfo, type Caller, type Drop, type HostDirectoryView, type HostEntry, type Mail, type PaseoPort, type PublishedAddress, type Registration } from "./types";
 
 export interface MailerOptions {
   /** Delay before a nudge after new mail or a turn end, so a burst gives one nudge. */
@@ -327,8 +327,16 @@ export class Mailer {
     if (original.from.serverId !== null) {
       const { serverId, agentId, name, title } = original.from;
       checkCrossHostBody(body);
+      let directory: HostDirectoryView | null;
+      try {
+        directory = await this.paseo.hostDirectory();
+      } catch {
+        directory = null;
+      }
+      const host = directory?.hosts.find((entry) => entry.serverId === serverId);
+      if (directory !== null && !host) throw unknownHost(serverId);
       // The hand-off re-resolves an archived sender by name, so only a nameless one is refused here.
-      if (name === null && (await this.goneOnPeer(serverId, agentId))) {
+      if (name === null && (await this.goneOnPeer(host, agentId))) {
         throw new UserError("the sender was archived or no longer exists on its host and had no registered name; the reply cannot be delivered");
       }
       const [delivery] = await this.queueRemote(caller, [{ address: name ?? `${AGENT_PREFIX}${agentId}`, serverId, agentId, name, title }], subject, body, thread);
@@ -382,14 +390,12 @@ export class Mailer {
   /**
    * Whether a remote agent is known to be archived or missing: its host reads online in a fresh
    * directory read and the lookup by id says so. A read or lookup that throws, or a host that is
-   * not online, tells nothing, so the answer is false.
+   * disabled or offline, tells nothing, so the answer is false.
    */
-  private async goneOnPeer(serverId: string, agentId: string): Promise<boolean> {
+  private async goneOnPeer(host: HostEntry | undefined, agentId: string): Promise<boolean> {
+    if (!host?.enabled || !host.online) return false;
     try {
-      const directory = await this.paseo.hostDirectory();
-      const host = directory.hosts.find((entry) => entry.serverId === serverId);
-      if (!host?.enabled || !host.online) return false;
-      const agent = await this.paseo.peerAgent(serverId, agentId);
+      const agent = await this.paseo.peerAgent(host.serverId, agentId);
       return agent === null || agent.archived;
     } catch {
       return false;

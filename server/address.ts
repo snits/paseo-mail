@@ -26,6 +26,10 @@ export function parseAddress(raw: string): ParsedAddress {
 /** Where a host part leads: this daemon, or one linked host. */
 export type HostMatch = { kind: "local" } | { kind: "remote"; host: HostEntry };
 
+export function unknownHost(hostPart: string): UserError {
+  return new UserError(`unknown host "${hostPart}": use the label or the serverId of a linked host`);
+}
+
 const labelOf = (entry: HostEntry): string | null => {
   const label = entry.label?.trim().toLowerCase() ?? "";
   return ADDRESS.test(label) ? label : null;
@@ -51,7 +55,7 @@ export class HostBook {
       const byLabel = this.linked.filter((host) => labelOf(host) === label);
       if (byLabel.length === 1) return { kind: "remote", host: byLabel[0]! };
     }
-    throw new UserError(`unknown host "${hostPart}": use the label or the serverId of a linked host`);
+    throw unknownHost(hostPart);
   }
 
   /** The linked hosts that are enabled and online. */

@@ -609,13 +609,18 @@ export class Mailer {
     }
   }
 
-  dispose(): Promise<void> {
+  async dispose(): Promise<void> {
     this.disposed = true;
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     if (this.sweep) clearInterval(this.sweep);
     this.sweep = null;
-    return Promise.all([this.paseo.release(), this.store.close(), this.registry.close()]).then(() => undefined);
+    // release() comes first: it closes the peer clients, so a running pass's calls on a connected peer
+    // fail rather than wait out their deadline; the stores close only after the running passes finish.
+    await this.paseo.release();
+    await this.handOffs.idle();
+    await this.imports.idle();
+    await Promise.all([this.store.close(), this.registry.close()]);
   }
 
   // ---------------------------------------------------------------- nudge

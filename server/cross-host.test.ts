@@ -343,14 +343,20 @@ describe("importDrops: clear without storing (design step 8)", () => {
 
   // m_ghost's sender does not exist on cantor; m_old's sender is archived there (fine: accepted).
   // Wrong: no sender lookup (m_ghost stored); parking a missing sender (m_ghost's key stays);
-  // treating archived as missing (m_old cleared unstored).
+  // treating archived as missing (m_old cleared unstored). place() leaves a matching record of
+  // m_ghost on cantor, so only the lookup rules it out. Wrong (paseo-mail#qkf2): checking the
+  // record before the sender exists (the line gives "no matching hand-off record" as the reason).
   it("clears a drop whose sender does not exist on its host, and accepts one whose sender is archived", async () => {
     const { cantor, mac } = await pairOf();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     cantor.paseo.add("old-id");
     cantor.paseo.archive("old-id");
     place(mac.paseo, "probe-id", "m_ghost", { ...dropped("m_ghost"), from: { agentId: "ghost-id", name: "ghost", title: null, serverId: CANTOR } });
     place(mac.paseo, "probe-id", "m_old", { ...dropped("m_old"), from: { agentId: "old-id", name: "old", title: null, serverId: CANTOR } });
     await mac.mailer.importDrops();
+    const ghostLines = logLines(errors).filter((line) => line.includes("m_ghost"));
+    expect(ghostLines).toHaveLength(1);
+    expect(ghostLines[0]).toContain("does not exist");
     expect(mac.store.get("m_ghost")).toBeUndefined();
     expect(hasDrop(mac.paseo, "probe-id", "m_ghost")).toBe(false);
     expect(mac.store.get("m_old")?.from).toEqual({ agentId: "old-id", name: "old", title: null, serverId: CANTOR });
@@ -409,6 +415,33 @@ describe("importDrops: park (design step 8)", () => {
     await mac.mailer.importDrops();
     expect(mac.store.get("m_100")?.to.agentId).toBe("probe-id");
     expect(hasDrop(mac.paseo, "probe-id", "m_100")).toBe(false);
+  });
+
+  // paseo-mail#qkf2. The directory lists cantor disabled, though the network still reaches it. m_200
+  // is forged (no record) and m_201 a duplicate (already stored, record on cantor): neither waits on
+  // a record to be decided. Wrong: the park check after the sender lookup, the record check or the
+  // duplicate check (a peerAgent call; m_200 cleared unstored; m_201 and its record cleared).
+  // Positive control: with cantor enabled again, the next pass clears both, and m_201's record.
+  it("parks a forged and a duplicate drop from a disabled host without looking up their sender", async () => {
+    const { cantor, mac } = await pairOf();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mac.store.create({ ...dropped("m_201"), to: { agentId: "probe-id", address: "probe", serverId: null } });
+    forge(mac.paseo, "probe-id", "m_200", dropped("m_200"));
+    place(mac.paseo, "probe-id", "m_201", dropped("m_201"));
+    const undo = reportHost(mac.paseo, CANTOR, { enabled: false, online: true });
+    const mark = mac.paseo.calls.length;
+    await mac.mailer.importDrops().catch(() => undefined);
+    const ops = mac.paseo.calls.slice(mark).map((call) => call.op);
+    expect.soft(ops.filter((op) => op === "peerAgent" || op === "clearHandOff" || op === "clearDrop")).toEqual([]);
+    expect.soft(hasDrop(mac.paseo, "probe-id", "m_200")).toBe(true);
+    expect.soft(hasDrop(mac.paseo, "probe-id", "m_201")).toBe(true);
+    expect.soft(recordOn(cantor.paseo, "lead-id", "m_201")).toBeDefined();
+    undo();
+    await mac.mailer.importDrops();
+    expect(hasDrop(mac.paseo, "probe-id", "m_200")).toBe(false);
+    expect(hasDrop(mac.paseo, "probe-id", "m_201")).toBe(false);
+    expect(recordOn(cantor.paseo, "lead-id", "m_201")).toBeUndefined();
+    expect(mac.store.all().map((mail) => mail.id)).toEqual(["m_201"]);
   });
 
   // An unparsable drop sits beside a good one. Whether the pass resolves or rejects is not pinned.
@@ -542,10 +575,13 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
 
   // The drop's key says m_key; its value is mail m_100, already stored. Wrong: the duplicate check
   // on the key's id (create("m_100") throws and the drop parks); clearing by the value's id.
+  // place() records m_100 again on cantor, under the value's id. Wrong (paseo-mail#qkf2): looking the
+  // record up, or clearing it, by the key's id (m_100's record stays on cantor).
   it("checks a duplicate by the value's id and clears the drop by its key", async () => {
-    const { mac } = await pairOf();
+    const { cantor, mac } = await pairOf();
     place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
     await mac.mailer.importDrops();
+    const mark = recordClears(mac.paseo).length;
     place(mac.paseo, "probe-id", "m_key", dropped("m_100"));
     await mac.mailer.importDrops();
     expect(clears(mac.paseo)).toEqual([
@@ -554,6 +590,22 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     ]);
     expect(hasDrop(mac.paseo, "probe-id", "m_key")).toBe(false);
     expect(mac.store.all().map((mail) => mail.id)).toEqual(["m_100"]);
+    expect(recordClears(mac.paseo).slice(mark)).toEqual([[CANTOR, "lead-id", "m_100"]]);
+    expect(recordOn(cantor.paseo, "lead-id", "m_100")).toBeUndefined();
+  });
+
+  // paseo-mail#qkf2. A fresh drop whose key (m_key) is not its mail's id (m_100); cantor holds the
+  // record of m_100. Wrong: looking the record up by the key's id (cleared unstored); clearing it
+  // by the key's id (m_100's record stays on cantor).
+  it("confirms and clears a fresh drop's record by the value's id, not the drop's key", async () => {
+    const { cantor, mac } = await pairOf();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    place(mac.paseo, "probe-id", "m_key", dropped("m_100"));
+    await mac.mailer.importDrops();
+    expect(mac.store.get("m_100")?.to.agentId).toBe("probe-id");
+    expect(recordClears(mac.paseo)).toEqual([[CANTOR, "lead-id", "m_100"]]);
+    expect(recordOn(cantor.paseo, "lead-id", "m_100")).toBeUndefined();
+    expect(hasDrop(mac.paseo, "probe-id", "m_key")).toBe(false);
   });
 
   // A known mail from a host now offline still waits like any other drop from it. Wrong: the
@@ -987,9 +1039,11 @@ describe("importDrops: the claimed sender host confirms the hand-off (paseo-mail
   // arrive again: m_701 with lead's matching record, m_702 with none, m_703 with a record naming
   // other-id. Wrong: a duplicate path that never clears the record (m_701's stays); one that clears
   // whatever record lead holds (m_703's gone) or asks for one that is not there (a call for m_702);
-  // storing again.
+  // storing again; the no-match discard ahead of the duplicate check (m_702 and m_703 logged as
+  // cleared unstored: the duplicate path logs nothing).
   it("clears a duplicate drop, and its record on cantor only when the record matches", async () => {
     const { cantor, mac } = await pairOf();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     for (const id of ["m_701", "m_702", "m_703"]) await mac.store.create({ ...dropped(id), to: { agentId: "probe-id", address: "probe", serverId: null } });
     const before = mac.store.all();
     place(mac.paseo, "probe-id", "m_701", dropped("m_701"));
@@ -1007,6 +1061,40 @@ describe("importDrops: the claimed sender host confirms the hand-off (paseo-mail
       ["probe-id", "m_703"],
     ]);
     expect.soft(mac.store.all()).toEqual(before);
+    expect.soft(logLines(errors).filter((line) => /m_70[123]/.test(line))).toEqual([]);
+  });
+
+  // m_710 is already stored; its drop arrives again with lead's matching record, and cantor refuses
+  // the record clear. Wrong: the duplicate path clearing the record without catching (the pass logs
+  // the failure and the drop stays for ever). Positive control: the failure is logged.
+  it("clears a duplicate drop and logs it when clearing its matching record on cantor throws", async () => {
+    const { network, cantor, mac } = await pairOf();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mac.store.create({ ...dropped("m_710"), to: { agentId: "probe-id", address: "probe", serverId: null } });
+    place(mac.paseo, "probe-id", "m_710", dropped("m_710"));
+    network.fault(CANTOR, "clearHandOff", true);
+    await mac.mailer.importDrops();
+    expect.soft(recordClears(mac.paseo)).toEqual([[CANTOR, "lead-id", "m_710"]]);
+    expect.soft(hasDrop(mac.paseo, "probe-id", "m_710")).toBe(false);
+    expect.soft(recordOn(cantor.paseo, "lead-id", "m_710")).toBeDefined();
+    expect.soft(logLines(errors).filter((line) => line.includes("[paseo-mail]") && line.includes("m_710")).length).toBeGreaterThan(0);
+  });
+
+  // lead holds a value under m_720's record key that is no record (a string, then an empty object).
+  // Wrong: reading the record's fields without checking its shape (the read throws: the drop parks
+  // for ever); treating any value as a match (stored). Positive control: m_721 beside it, recorded.
+  it.each([{ kind: "a string", value: "not a record" as unknown }, { kind: "an empty object", value: {} }])("clears a drop unstored when its record key holds $kind", async ({ value }) => {
+    const { cantor, mac } = await pairOf();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    forge(mac.paseo, "probe-id", "m_720", dropped("m_720"));
+    cantor.paseo.setMetadata("lead-id", { [`${OUT_PREFIX}m_720`]: value });
+    place(mac.paseo, "probe-id", "m_721", dropped("m_721"));
+    await mac.mailer.importDrops();
+    expect.soft(hasDrop(mac.paseo, "probe-id", "m_720")).toBe(false);
+    expect.soft(mac.store.get("m_720")).toBeUndefined();
+    expect.soft(recordClears(mac.paseo).filter((args) => args[2] === "m_720")).toEqual([]);
+    expect.soft(recordOn(cantor.paseo, "lead-id", "m_720")).toStrictEqual(value);
+    expect(mac.store.get("m_721")?.to.agentId).toBe("probe-id");
   });
 });
 

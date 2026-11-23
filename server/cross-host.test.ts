@@ -741,6 +741,30 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
       open();
     }
   });
+
+  // The Mac's hand-off of m_050 (probe to lead on cantor) is parked on its write when a drop from
+  // lead lands. Wrong: one queue for hand-offs and imports (the import waits behind the parked write).
+  // Positive control: once the write is released, the hand-off stamps m_050.
+  it("an import pass does not wait behind a hand-off pass parked on its write", async () => {
+    const { mac } = await pairOf();
+    await mac.store.create(mailOf({ id: "m_050", from: { agentId: "probe-id", name: "probe", title: "Probe", serverId: null }, to: { agentId: "lead-id", address: "lead@cantor", serverId: CANTOR } }));
+    place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
+    const release = mac.paseo.holdWrites();
+    try {
+      const handOff = mac.mailer.flushOutbox().catch(() => undefined);
+      expect(await until(() => mac.paseo.parkedWrites >= 1)).toBe(true);
+      const imported = mac.mailer.importDrops().catch(() => undefined);
+      expect(await Promise.race([imported.then(() => "settled"), wait(1000).then(() => "pending")])).toBe("settled");
+      expect(mac.store.get("m_100")?.to.agentId).toBe("probe-id");
+      expect(hasDrop(mac.paseo, "probe-id", "m_100")).toBe(false);
+      expect(mac.store.get("m_050")?.handedOffAt).toBeNull();
+      release();
+      await handOff;
+      expect(mac.store.get("m_050")?.handedOffAt).not.toBeNull();
+    } finally {
+      release();
+    }
+  });
 });
 
 describe("import triggers (design step 8)", () => {

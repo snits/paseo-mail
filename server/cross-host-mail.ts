@@ -214,7 +214,7 @@ export class CrossHostMail {
     }
   }
 
-  /** Clears a drop that failed its checks on this pass. If the clear fails, a later pass checks it again. */
+  /** Attempts to clear a drop that failed its checks on this pass. */
   private async discard(drop: Drop, why: string): Promise<void> {
     console.error(`[paseo-mail] ${why}; clearing it unstored`);
     await this.paseo.clearDrop(drop.agentId, drop.mailId);

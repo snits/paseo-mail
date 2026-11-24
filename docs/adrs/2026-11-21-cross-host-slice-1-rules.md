@@ -37,7 +37,7 @@ imports it. Building it showed four gaps in that ADR.
 - **Rewrite `to.address` on import.** On import, `to.address` becomes the text before its first
   `@`, trimmed and not normalized. `probe@m2-max` is stored as `probe`.
 - **Validate the mail id on import.** An imported mail whose id does not match
-  `^m_[0-9a-z]{1,64}$` (`MAIL_ID` in `server/cross-host-mail.ts`, the shape this plugin's ids take) is
+  `^m_[0-9a-z]{1,64}$` (`MAIL_ID` in `server/cross-host-mail.ts`) is
   cleared unstored and logged, before any host lookup, because the id becomes a file name in
   the store. This adds a fourth reason to the delivery ADR's list of drops cleared without
   being stored.

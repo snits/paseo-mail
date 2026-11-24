@@ -65,7 +65,7 @@ export function nudgeText(count: number, named = true): string {
 let lastStamp = 0;
 let counter = 0;
 
-/** Ids sort in creation order (time, then a counter), so mails sent in the same millisecond list in order. Each matches MAIL_ID. */
+/** Ids sort in creation order (time, then a counter), so mails sent in the same millisecond list in order. */
 function newId(): string {
   const stamp = Date.now();
   counter = stamp === lastStamp ? counter + 1 : 0;

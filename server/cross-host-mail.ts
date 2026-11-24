@@ -15,7 +15,7 @@ function nameIn(address: string): string | null {
 }
 
 /**
- * The shape of a mail id, as newId() makes it. The store writes a mail to `<id>.json`, so an
+ * The shape expected on import. The store writes a mail to `<id>.json`, so an
  * id from another daemon must match this before it is stored (no path separators, no dots).
  */
 export const MAIL_ID = /^m_[0-9a-z]{1,64}$/;
@@ -146,7 +146,6 @@ export class CrossHostMail {
       try {
         await this.importDrop(drop, directory);
       } catch (error) {
-        // One drop that fails never holds back the others.
         console.error(`[paseo-mail] importing mail ${drop.mailId} on ${drop.agentId} failed; it stays for the next pass:`, (error as Error).message);
       }
     }
@@ -164,7 +163,7 @@ export class CrossHostMail {
     const parsed = MailSchema.safeParse(drop.value);
     if (!parsed.success) return this.discard(drop, `${where} is not a mail`);
     const mail = parsed.data;
-    // The id becomes a file name in the store, so only the shape this plugin makes may pass.
+    // The id becomes a file name in the store, so check its shape before using it.
     if (!MAIL_ID.test(mail.id)) return this.discard(drop, `${where} has an id that is not a mail id (${JSON.stringify(mail.id)})`);
     const { serverId, agentId: senderId } = mail.from;
     const host = serverId === null ? undefined : directory.hosts.find((entry) => entry.serverId === serverId);
@@ -206,7 +205,7 @@ export class CrossHostMail {
     await this.paseo.clearDrop(drop.agentId, drop.mailId);
   }
 
-  /** Clears the sender's hand-off record once its mail is stored here; a failure is logged, since the record is only a leftover. */
+  /** Attempts to clear the sender's hand-off record once its mail is stored here. */
   private async clearHandOffBestEffort(serverId: string, senderId: string, mailId: string): Promise<void> {
     try {
       await this.paseo.clearHandOff(serverId, senderId, mailId);
@@ -215,7 +214,7 @@ export class CrossHostMail {
     }
   }
 
-  /** Clears a drop that can never be imported, without storing it. */
+  /** Clears a drop that failed its checks on this pass. If the clear fails, a later pass checks it again. */
   private async discard(drop: Drop, why: string): Promise<void> {
     console.error(`[paseo-mail] ${why}; clearing it unstored`);
     await this.paseo.clearDrop(drop.agentId, drop.mailId);

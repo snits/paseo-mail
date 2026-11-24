@@ -454,6 +454,36 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     expect(cantor.store.outbox()).toEqual([]);
   });
 
+  it("keeps mail queued for a host that rejects without a reason and hands off to the other host", async () => {
+    const { network, cantor, mac } = await sender();
+    const attic = addAttic(network);
+    publish(attic, "keeper-id", "keeper");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    await cantor.store.create(outMail("m_002", ATTIC, "keeper-id", "keeper@attic"));
+    await cantor.store.create(outMail("m_003", MAC, "probe-id", "probe@m2-max"));
+    const writeDrop = cantor.paseo.writeDrop.bind(cantor.paseo);
+    cantor.paseo.writeDrop = async (serverId, agentId, mail) => {
+      if (serverId === MAC) return Promise.reject();
+      await writeDrop(serverId, agentId, mail);
+    };
+
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await cantor.mailer.flushOutbox();
+      expect(errors).toHaveBeenCalledExactlyOnceWith(
+        `[paseo-mail] handing mail to ${MAC} failed; retrying on the next pass:`,
+        "undefined",
+      );
+    } finally {
+      errors.mockRestore();
+    }
+    expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001", "m_003"]);
+    expect(mac.metadata.get("probe-id")?.[`${DROP_PREFIX}m_001`]).toBeUndefined();
+    expect(mac.metadata.get("probe-id")?.[`${DROP_PREFIX}m_003`]).toBeUndefined();
+    expect(attic.metadata.get("keeper-id")?.[`${DROP_PREFIX}m_002`]).toMatchObject({ id: "m_002" });
+    expect(stamped(cantor.store, "m_002")).toBe(true);
+  });
+
   // "other" publishes first. Wrong: matching the stored address as typed ("Probe@M2-Max") or its raw
   // local part ("Probe"); taking the first publisher.
   it("resolves an unresolved mail by the local part of to.address", async () => {

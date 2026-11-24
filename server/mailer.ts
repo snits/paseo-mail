@@ -80,7 +80,7 @@ export const MAIL_ID = /^m_[0-9a-z]{1,64}$/;
 
 /**
  * The digest a hand-off record carries: lowercase hex SHA-256 of the JSON array of the fields the
- * importer keeps, in a fixed order, taken from the mail exactly as the drop carries it.
+ * importer reads from the drop, in a fixed order, taken from the mail exactly as the drop carries it.
  */
 export function handOffDigest(mail: Mail): string {
   const fields = [mail.id, mail.threadId, mail.inReplyTo, mail.from.agentId, mail.from.name, mail.from.title, mail.from.serverId, mail.to.address, mail.subject, mail.body, mail.createdAt];

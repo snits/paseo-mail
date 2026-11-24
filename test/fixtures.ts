@@ -418,7 +418,7 @@ export function sha256(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-/** The digest a hand-off record carries for `mail`: its kept fields in their fixed order, written out here rather than read from production. */
+/** The digest a hand-off record carries for `mail`: the fields the importer reads from the drop, in their fixed order, written out here rather than read from production. */
 export function digestOf(mail: Mail): string {
   return sha256([mail.id, mail.threadId, mail.inReplyTo, mail.from.agentId, mail.from.name, mail.from.title, mail.from.serverId, mail.to.address, mail.subject, mail.body, mail.createdAt]);
 }

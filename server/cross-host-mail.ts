@@ -20,6 +20,15 @@ function nameIn(address: string): string | null {
  */
 export const MAIL_ID = /^m_[0-9a-z]{1,64}$/;
 
+const CROSS_HOST_CONTENT_LIMIT = 32 * 1024;
+
+/** Measures the subject and body as separate UTF-8 fields under one cross-host limit. */
+export function crossHostSizeError(subject: string, body: string): string | null {
+  const bytes = Buffer.byteLength(subject, "utf8") + Buffer.byteLength(body, "utf8");
+  if (bytes <= CROSS_HOST_CONTENT_LIMIT) return null;
+  return `the subject and body total ${bytes} UTF-8 bytes, exceeding the cross-host limit of ${CROSS_HOST_CONTENT_LIMIT} bytes`;
+}
+
 /**
  * The digest a hand-off record carries: lowercase hex SHA-256 of the JSON array of the fields the
  * importer reads from the drop, in a fixed order, taken from the mail exactly as the drop carries it.
@@ -154,9 +163,9 @@ export class CrossHostMail {
   /**
    * Stores one drop in the holder's inbox, leaves it for a later pass (park), or clears it unstored.
    * A drop is stored only when its claimed sender's agent holds a matching hand-off record (naming
-   * this host and the holder, with the digest of this mail). When it clears an unconfirmed drop,
-   * it writes nothing to the claimed host. After storing, it attempts to clear the sender's
-   * record before clearing the local drop.
+   * this host and the holder, with the digest of this mail) and the mail fits the cross-host limit.
+   * When it discards a drop unstored, it writes nothing to the claimed host. After storing, it
+   * attempts to clear the sender's record before clearing the local drop.
    */
   private async importDrop(drop: Drop, directory: HostDirectoryView): Promise<void> {
     const where = `mail ${drop.mailId} on ${drop.agentId}`;
@@ -190,6 +199,8 @@ export class CrossHostMail {
       return;
     }
     if (!confirmed) return this.discard(drop, `${where} claims host ${serverId}, whose agent ${senderId} holds no matching hand-off record`);
+    const sizeError = crossHostSizeError(mail.subject, mail.body);
+    if (sizeError !== null) return this.discard(drop, `${where}: ${sizeError}`);
     // A create that throws leaves the drop for the next pass (logged by the pass).
     await this.store.create({
       ...mail,

@@ -51,13 +51,16 @@ live holder is an error, and nothing is sent.
 host's label, in any case, or its serverId. A label that is missing, not a valid name, or shared
 by two linked hosts cannot be used; use the serverId, which works for any enabled link.
 When the host is online the name is checked at send time like a local one; when it is not, the
-mail is accepted and waits on the sender's daemon until the host comes back. A body sent to
-another host is at most 32 KiB. Both daemons need paseo-mail 0.3.0 or later: a daemon without
+mail is accepted and waits on the sender's daemon until the host comes back. Mail to another
+host has a combined 32 KiB limit for the subject and body, measured in UTF-8 bytes. An oversized
+send with any remote recipient fails before storing any copy. Local-only mail has no size cap.
+Both daemons need paseo-mail 0.3.0 or later: a daemon without
 it publishes no addresses, so its agents cannot be found by name, and it never imports the mail
 handed to it. Both daemons must also link each other in Paseo: a daemon with no link to the
 sender's host drops the mail unstored, and the sender is not told. Before storing a mail, the
 receiving daemon checks with the sender's daemon that it handed off that mail, unchanged, to
-this recipient; a mail the sender's daemon has no record of is dropped unstored. `role:<role>@host` is planned.
+this recipient; a mail the sender's daemon has no record of is dropped unstored. The receiving
+daemon also drops oversized mail before storing it. `role:<role>@host` is planned.
 
 ### 3. Deliver
 
@@ -72,6 +75,8 @@ told about. Only new mail wakes it.
 
 `mail_list`, `mail_read` and `mail_reply`. Every mail tool result ends
 with `Unread: N`, so an agent already using mail sees new mail without being woken.
+For a reply to another host, the size limit includes the full reply subject, including any
+`Re: ` prefix.
 
 Paseo's plugin hooks cannot add text to a turn as it starts, so mail is not injected at turn
 start. See `docs/adrs/2026-11-10-no-turn-start-injection.md`.

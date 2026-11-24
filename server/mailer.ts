@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { AGENT_PREFIX, HostBook, parseAddress, unknownHost, type ParsedAddress } from "./address";
-import { CrossHostMail } from "./cross-host-mail";
+import { CrossHostMail, crossHostSizeError } from "./cross-host-mail";
 import { Queue } from "./files";
 import { normalize, type Registry } from "./registry";
 import { isLocal, type MailStore } from "./store";
@@ -19,9 +19,6 @@ export interface MailerOptions {
   sweepMs?: number;
   now?: () => string;
 }
-
-/** Most UTF-8 bytes a mail body may have when it goes to another daemon. */
-export const CROSS_HOST_BODY_LIMIT = 32 * 1024;
 
 /** One recipient of a send: the address as typed and the agent it reached (null: not resolved yet, on another host). */
 export interface Delivery {
@@ -48,12 +45,10 @@ interface RemoteTarget {
   title: string | null;
 }
 
-/** Refuses a body over the cross-host cap, measured in UTF-8 bytes. */
-function checkCrossHostBody(body: string): void {
-  const bytes = Buffer.byteLength(body, "utf8");
-  if (bytes > CROSS_HOST_BODY_LIMIT) {
-    throw new UserError(`the body is ${bytes} bytes; mail to an agent on a linked host may have at most ${CROSS_HOST_BODY_LIMIT} bytes (UTF-8)`);
-  }
+/** Refuses a subject and body whose combined UTF-8 size exceeds the cross-host limit. */
+function checkCrossHostSize(subject: string, body: string): void {
+  const sizeError = crossHostSizeError(subject, body);
+  if (sizeError !== null) throw new UserError(sizeError);
 }
 
 export function nudgeText(count: number, named = true): string {
@@ -263,7 +258,7 @@ export class Mailer {
       }
     }
     // The cap covers every copy of the send, so it is checked before any copy is stored.
-    if (remotes.size > 0) checkCrossHostBody(body);
+    if (remotes.size > 0) checkCrossHostSize(subject, body);
     const deliveries = await this.deliver(caller, [...targets.values()], subject, body, thread);
     if (remotes.size > 0) deliveries.push(...(await this.queueRemote(caller, [...remotes.values()], subject, body, thread)));
     return deliveries;
@@ -311,7 +306,7 @@ export class Mailer {
     const thread = { threadId: original.threadId, inReplyTo: original.id };
     if (original.from.serverId !== null) {
       const { serverId, agentId, name, title } = original.from;
-      checkCrossHostBody(body);
+      checkCrossHostSize(subject, body);
       let directory: HostDirectoryView | null;
       try {
         directory = await this.paseo.hostDirectory();

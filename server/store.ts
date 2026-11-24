@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { Queue, writeAtomic } from "./files";
-import { MailSchema, type Mail } from "./types";
+import { MailSchema, rejectionReason, type Mail } from "./types";
 
 /** Whether a mail is for this daemon. */
 export function isLocal(mail: Mail): boolean {
@@ -43,7 +43,7 @@ export class MailStore {
         const mail = MailSchema.parse(JSON.parse(await readFile(path.join(this.dir, name), "utf8")));
         this.mails.set(mail.id, mail);
       } catch (error) {
-        console.error(`[paseo-mail] skipping unreadable mail file ${name}:`, (error as Error).message);
+        console.error(`[paseo-mail] skipping unreadable mail file ${name}:`, rejectionReason(error));
       }
     }
   }

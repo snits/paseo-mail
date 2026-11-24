@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { HostBook, parseAddress } from "./address";
 import { Queue } from "./files";
 import type { MailStore } from "./store";
-import { HandOffRecordSchema, MailSchema, type Drop, type HostDirectoryView, type Mail, type PaseoPort, type PublishedAddress } from "./types";
+import { HandOffRecordSchema, MailSchema, rejectionReason, type Drop, type HostDirectoryView, type Mail, type PaseoPort, type PublishedAddress } from "./types";
 
 /** The name an outbox address reaches its recipient by, or null when it has none (`agent:<id>`) or is not a valid name. */
 function nameIn(address: string): string | null {
@@ -75,7 +75,7 @@ export class CrossHostMail {
         await this.handOffTo(serverId, mails, directory.self.serverId);
       } catch (error) {
         // Stop this host for the pass, so no later mail to it overtakes the one that failed.
-        console.error(`[paseo-mail] handing mail to ${serverId} failed; retrying on the next pass:`, (error as Error).message);
+        console.error(`[paseo-mail] handing mail to ${serverId} failed; retrying on the next pass:`, rejectionReason(error));
       }
     }
   }
@@ -146,7 +146,7 @@ export class CrossHostMail {
       try {
         await this.importDrop(drop, directory);
       } catch (error) {
-        console.error(`[paseo-mail] importing mail ${drop.mailId} on ${drop.agentId} failed; it stays for the next pass:`, (error as Error).message);
+        console.error(`[paseo-mail] importing mail ${drop.mailId} on ${drop.agentId} failed; it stays for the next pass:`, rejectionReason(error));
       }
     }
   }
@@ -210,7 +210,7 @@ export class CrossHostMail {
     try {
       await this.paseo.clearHandOff(serverId, senderId, mailId);
     } catch (error) {
-      console.error(`[paseo-mail] clearing the hand-off record of mail ${mailId} on ${senderId} (${serverId}) failed:`, (error as Error).message);
+      console.error(`[paseo-mail] clearing the hand-off record of mail ${mailId} on ${senderId} (${serverId}) failed:`, rejectionReason(error));
     }
   }
 

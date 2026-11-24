@@ -132,5 +132,5 @@ export interface Caller {
 export class UserError extends Error {}
 
 export function rejectionReason(error: unknown): string {
-  return (error as Error).message;
+  return error instanceof Error ? error.message : String(error);
 }

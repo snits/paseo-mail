@@ -2,7 +2,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { Queue, writeAtomic } from "./files";
-import { RegistrationSchema, UserError, type Registration } from "./types";
+import { RegistrationSchema, rejectionReason, UserError, type Registration } from "./types";
 
 export const ADDRESS = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
@@ -39,7 +39,7 @@ export class Registry {
     try {
       for (const entry of z.array(RegistrationSchema).parse(JSON.parse(raw))) this.entries.set(entry.agentId, entry);
     } catch (error) {
-      console.error(`[paseo-mail] ignoring unreadable registry ${this.file}:`, (error as Error).message);
+      console.error(`[paseo-mail] ignoring unreadable registry ${this.file}:`, rejectionReason(error));
     }
   }
 

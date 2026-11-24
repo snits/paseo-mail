@@ -4,7 +4,7 @@ import { CrossHostMail } from "./cross-host-mail";
 import { Queue } from "./files";
 import { normalize, type Registry } from "./registry";
 import { isLocal, type MailStore } from "./store";
-import { UserError, type AgentInfo, type Caller, type HostDirectoryView, type HostEntry, type Mail, type PaseoPort, type PublishedAddress, type Registration } from "./types";
+import { rejectionReason, UserError, type AgentInfo, type Caller, type HostDirectoryView, type HostEntry, type Mail, type PaseoPort, type PublishedAddress, type Registration } from "./types";
 
 export { MAIL_ID, handOffDigest } from "./cross-host-mail";
 
@@ -158,7 +158,7 @@ export class Mailer {
         try {
           return (await this.paseo.peerAddresses(serverId)).map((entry) => ({ address: `${entry.name}@${host}`, host, serverId, title: entry.title }));
         } catch (error) {
-          console.error(`[paseo-mail] listing the addresses on ${host} failed:`, (error as Error).message);
+          console.error(`[paseo-mail] listing the addresses on ${host} failed:`, rejectionReason(error));
           return [];
         }
       }),
@@ -240,7 +240,7 @@ export class Mailer {
     try {
       this.hostBook = new HostBook(await this.paseo.hostDirectory());
     } catch (error) {
-      console.error("[paseo-mail] reading the host directory failed:", (error as Error).message);
+      console.error("[paseo-mail] reading the host directory failed:", rejectionReason(error));
     }
     return this.hostBook;
   }
@@ -368,7 +368,7 @@ export class Mailer {
       const id = await this.storeNew(from, { agentId: target.agentId, address: target.address, serverId: target.serverId }, subject, body, thread);
       deliveries.push({ address: target.address, agentId: target.agentId, serverId: target.serverId, name: target.name, title: target.title, mailId: id });
     }
-    void this.flushOutbox().catch((error) => console.error("[paseo-mail] handing off the outbox failed:", (error as Error).message));
+    void this.flushOutbox().catch((error) => console.error("[paseo-mail] handing off the outbox failed:", rejectionReason(error)));
     return deliveries;
   }
 
@@ -422,22 +422,22 @@ export class Mailer {
     if (this.disposed) return;
     try {
       this.paseo.watch({
-        hostOnline: () => void this.refreshHosts().then(() => this.flushOutbox()).catch((error) => console.error("[paseo-mail] hand-off on host online failed:", (error as Error).message)),
-        dropsChanged: () => void this.importDrops().catch((error) => console.error("[paseo-mail] import on new drops failed:", (error as Error).message)),
+        hostOnline: () => void this.refreshHosts().then(() => this.flushOutbox()).catch((error) => console.error("[paseo-mail] hand-off on host online failed:", rejectionReason(error))),
+        dropsChanged: () => void this.importDrops().catch((error) => console.error("[paseo-mail] import on new drops failed:", rejectionReason(error))),
       });
     } catch (error) {
-      console.error("[paseo-mail] watching hosts failed:", (error as Error).message);
+      console.error("[paseo-mail] watching hosts failed:", rejectionReason(error));
     }
     this.startSweep();
-    await this.importDrops().catch((error) => console.error("[paseo-mail] importing drops failed:", (error as Error).message));
-    await this.flushOutbox().catch((error) => console.error("[paseo-mail] handing off the outbox failed:", (error as Error).message));
+    await this.importDrops().catch((error) => console.error("[paseo-mail] importing drops failed:", rejectionReason(error)));
+    await this.flushOutbox().catch((error) => console.error("[paseo-mail] handing off the outbox failed:", rejectionReason(error)));
   }
 
   private startSweep(): void {
     if (this.sweep) return;
     this.sweep = setInterval(() => {
-      void this.importDrops().catch((error) => console.error("[paseo-mail] sweep import failed:", (error as Error).message));
-      void this.flushOutbox().catch((error) => console.error("[paseo-mail] sweep hand-off failed:", (error as Error).message));
+      void this.importDrops().catch((error) => console.error("[paseo-mail] sweep import failed:", rejectionReason(error)));
+      void this.flushOutbox().catch((error) => console.error("[paseo-mail] sweep hand-off failed:", rejectionReason(error)));
     }, this.sweepMs);
     (this.sweep as { unref?: () => void }).unref?.();
   }
@@ -509,7 +509,7 @@ export class Mailer {
     this.cancel(agentId);
     const timer = setTimeout(() => {
       this.timers.delete(agentId);
-      void this.nudge(agentId, attempt).catch((error) => console.error(`[paseo-mail] nudge of ${agentId} failed:`, (error as Error).message));
+      void this.nudge(agentId, attempt).catch((error) => console.error(`[paseo-mail] nudge of ${agentId} failed:`, rejectionReason(error)));
     }, delay);
     (timer as { unref?: () => void }).unref?.();
     this.timers.set(agentId, timer);
@@ -607,7 +607,7 @@ export class Mailer {
     try {
       await this.paseo.publishAddress(agentId, entry && { name: entry.name, roles: entry.roles });
     } catch (error) {
-      console.error(`[paseo-mail] publishing the address of ${agentId} failed:`, (error as Error).message);
+      console.error(`[paseo-mail] publishing the address of ${agentId} failed:`, rejectionReason(error));
     }
   }
 

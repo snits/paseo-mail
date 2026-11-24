@@ -1,6 +1,7 @@
 # Cross-host delivery: an outbox and a metadata drop
 
-Status: Accepted
+Status: Accepted. The **Size cap** rule is superseded by
+[Cross-host mail size cap](2026-11-23-cross-host-size-cap.md), which also adds an import refusal.
 
 ## Context
 

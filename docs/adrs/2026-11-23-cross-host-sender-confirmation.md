@@ -1,6 +1,7 @@
 # Cross-host mail: the importer confirms each drop with its sender's host
 
-Status: Accepted
+Status: Accepted. [Cross-host mail size cap](2026-11-23-cross-host-size-cap.md) adds an import
+refusal before storage in step 6 and extends the acceptance criterion with the size limit.
 
 ## Context
 

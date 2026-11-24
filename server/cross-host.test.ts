@@ -320,6 +320,27 @@ describe("importDrops: clear without storing (design step 8)", () => {
     expect(mac.store.all()).toEqual([]);
   });
 
+  // Reading .message from an undefined rejection aborts the pass before the second clear.
+  it("continues clearing malformed drops after a clear rejects without a reason", async () => {
+    const { mac } = await pairOf();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    place(mac.paseo, "probe-id", "m_first", "not a mail");
+    place(mac.paseo, "probe-id", "m_second", "not a mail");
+    const clear = mac.paseo.clearDrop.bind(mac.paseo);
+    mac.paseo.clearDrop = (agentId, mailId) =>
+      mailId === "m_first" ? Promise.reject() : clear(agentId, mailId);
+
+    const [pass] = await Promise.allSettled([mac.mailer.importDrops()]);
+    expect.soft(hasDrop(mac.paseo, "probe-id", "m_first")).toBe(true);
+    expect.soft(hasDrop(mac.paseo, "probe-id", "m_second")).toBe(false);
+    expect.soft(mac.store.all()).toEqual([]);
+    expect.soft(pass?.status).toBe("fulfilled");
+    expect(errors).toHaveBeenCalledWith(
+      "[paseo-mail] importing mail m_first on probe-id failed; it stays for the next pass:",
+      "undefined",
+    );
+  });
+
   // No directory entry has srv_Nowhere. Wrong: parking it as a host that is not online (key stays);
   // storing it with no host check.
   it("clears a drop whose sender's host is in no directory entry", async () => {
@@ -977,6 +998,27 @@ describe("importDrops: the claimed sender host confirms the hand-off (paseo-mail
     expect(await until(() => mac.paseo.sent.length > 0)).toBe(true);
   });
 
+  // Throwing from the record-clear log handler leaves a stored mail's local drop behind.
+  it("clears the local drop when its sender record clear rejects without a reason", async () => {
+    const { cantor, mac } = await pairOf();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    place(mac.paseo, "probe-id", "m_601", dropped("m_601"));
+    const clear = mac.paseo.clearHandOff.bind(mac.paseo);
+    mac.paseo.clearHandOff = (serverId, agentId, mailId) =>
+      serverId === CANTOR && agentId === "lead-id" && mailId === "m_601"
+        ? Promise.reject()
+        : clear(serverId, agentId, mailId);
+
+    await mac.mailer.importDrops();
+    expect.soft(mac.store.get("m_601")?.to.agentId).toBe("probe-id");
+    expect.soft(recordOn(cantor.paseo, "lead-id", "m_601")).toBeDefined();
+    expect.soft(hasDrop(mac.paseo, "probe-id", "m_601")).toBe(false);
+    expect(errors).toHaveBeenCalledWith(
+      `[paseo-mail] clearing the hand-off record of mail m_601 on lead-id (${CANTOR}) failed:`,
+      "undefined",
+    );
+  });
+
   // The lookup of lead on cantor throws on the first pass, then works. Wrong: the record cleared while
   // the drop parks; storing twice; no record clear on the later pass. The third pass finds nothing.
   it("a drop parked while its sender lookup throws is imported once by a later pass, which then clears its record", async () => {
@@ -1130,6 +1172,18 @@ describe("import triggers (design step 8)", () => {
     place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
     for (const watcher of [...mac.paseo.watchers]) watcher.dropsChanged();
     expect(await until(() => mac.store.get("m_100") !== undefined)).toBe(true);
+  });
+
+  // Rethrowing while logging a watcher-triggered import creates an unhandled rejection.
+  it("logs a dropsChanged import failure when listing rejects without a reason", async () => {
+    const { mac } = await pairOf();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mac.paseo.localDrops = () => Promise.reject();
+
+    for (const watcher of [...mac.paseo.watchers]) watcher.dropsChanged();
+    await vi.waitFor(() => {
+      expect(errors).toHaveBeenCalledWith("[paseo-mail] import on new drops failed:", "undefined");
+    });
   });
 
   // Wrong: a sweep that only hands off.

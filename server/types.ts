@@ -130,3 +130,7 @@ export interface Caller {
 
 /** A refusal the agent can act on, returned as a tool error rather than logged. */
 export class UserError extends Error {}
+
+export function rejectionReason(error: unknown): string {
+  return (error as Error).message;
+}

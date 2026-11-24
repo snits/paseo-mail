@@ -641,6 +641,18 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     expect(stamped(cantor.store, "m_001")).toBe(true);
   });
 
+  // Wrong: scheduling a separate pass for each request made before the first pass starts.
+  it("shares one hand-off pass for flushes requested before it starts", async () => {
+    const { cantor, mac } = await linked();
+    publish(mac.paseo, "probe-id", "probe");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    const mark = cantor.paseo.calls.length;
+    await Promise.all([cantor.mailer.flushOutbox(), cantor.mailer.flushOutbox()]);
+    expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_001"]);
+    expect(stamped(cantor.store, "m_001")).toBe(true);
+    expect(cantor.paseo.calls.slice(mark).filter((call) => call.op === "hostDirectory")).toHaveLength(1);
+  });
+
   // Wrong: joining the running pass leaves m_002 waiting; an ordinary FIFO does a directory read
   // for every request; concurrent passes read the directory again while the first write is parked.
   it("coalesces a burst of flushes into one later pass that hands off late mail", async () => {
@@ -663,6 +675,54 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     await Promise.all([first, ...burst]);
     expect(starts()).toHaveLength(2);
     expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_001", "m_002"]);
+  });
+
+  // Wrong: translating a waiting hand-off's rejection to success for a caller joining that pass.
+  it("every flush sharing a waiting hand-off sees its rejection", async () => {
+    const { cantor, mac } = await linked();
+    publish(mac.paseo, "probe-id", "probe");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    const write = park(cantor.paseo, "writeDrop");
+    held.push(write.open);
+    const first = quiet(cantor.mailer.flushOutbox());
+    expect(await until(() => write.parked === 1)).toBe(true);
+    await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
+    const followers = Promise.allSettled([cantor.mailer.flushOutbox(), cantor.mailer.flushOutbox()]);
+    const directory = park(cantor.paseo, "hostDirectory");
+    held.push(directory.open);
+    write.open();
+    await first;
+    expect(await until(() => directory.parked === 1)).toBe(true);
+    const refused = new Error("directory refused");
+    directory.refuse(refused);
+    expect(await followers).toEqual([
+      { status: "rejected", reason: refused },
+      { status: "rejected", reason: refused },
+    ]);
+    expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_001"]);
+    expect(stamped(cantor.store, "m_002")).toBe(false);
+    await cantor.mailer.flushOutbox();
+    expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_001", "m_002"]);
+    expect(stamped(cantor.store, "m_002")).toBe(true);
+  });
+
+  // Wrong: hand-off waiting for the import lane to finish while its drop listing is parked.
+  it("writes and stamps an outgoing drop while import is listing drops", async () => {
+    const { cantor, mac } = await linked();
+    publish(mac.paseo, "probe-id", "probe");
+    await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
+    const listing = park(cantor.paseo, "localDrops");
+    held.push(listing.open);
+    const importing = quiet(cantor.mailer.importDrops());
+    expect(await until(() => listing.parked === 1)).toBe(true);
+    const flushing = quiet(cantor.mailer.flushOutbox());
+    try {
+      expect(await until(() => stamped(cantor.store, "m_001"))).toBe(true);
+      expect(writes(cantor.paseo).map((write) => [write.mail.id, write.agentId])).toEqual([["m_001", "probe-id"]]);
+    } finally {
+      listing.open();
+      await Promise.all([importing, flushing]);
+    }
   });
 
   // Pass 1 parks on m_001's write; a second pass for m_002 (to other-id) is queued behind it; dispose()

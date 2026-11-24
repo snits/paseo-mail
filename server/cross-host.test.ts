@@ -636,14 +636,14 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     expect(mac.store.all()).toHaveLength(1);
   });
 
-  // Two passes started together on one drop. Wrong: passes not serialized (both list the drop and
-  // look up its sender; the second create throws "already exists").
-  it("serializes passes: two concurrent imports handle a drop once", async () => {
+  // Wrong: scheduling a separate pass for each request made before the first pass starts.
+  it("shares one import pass for requests made before it starts", async () => {
     const { mac } = await pairOf();
     place(mac.paseo, "probe-id", "m_100", dropped("m_100"));
     const mark = mac.paseo.calls.length;
     await Promise.all([mac.mailer.importDrops(), mac.mailer.importDrops()]);
     const calls = mac.paseo.calls.slice(mark);
+    expect(calls.filter((call) => call.op === "localDrops")).toHaveLength(1);
     expect(calls.filter((call) => call.op === "peerAgent")).toHaveLength(1);
     expect(calls.filter((call) => call.op === "clearDrop")).toHaveLength(1);
     expect(mac.store.all().map((mail) => mail.id)).toEqual(["m_100"]);

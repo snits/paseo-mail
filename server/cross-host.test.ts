@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ATTIC, CANTOR, DROP_PREFIX, MAC, OUT_PREFIX, linkedHosts, mailOf, park, reportHost, setup, setupPair, toolContext, until, wait, type Env, type FakeNetwork, type FakePaseo } from "../test/fixtures";
+import { ATTIC, CANTOR, DROP_PREFIX, MAC, OUT_PREFIX, linkedHosts, mailOf, park, recordOf, reportHost, reversedKeys, setup, setupPair, toolContext, until, wait, type Env, type FakeNetwork, type FakePaseo } from "../test/fixtures";
 import type { Mailer, MailerOptions } from "./mailer";
 import { mailTools } from "./tools";
 import type { Mail } from "./types";
@@ -49,16 +48,6 @@ async function macUnstarted() {
 /** A mail from lead on cantor to probe on the Mac, as cantor's hand-off writes it into the drop. */
 function dropped(id: string): Mail {
   return mailOf({ id, from: { agentId: "lead-id", name: "lead", title: "Lead", serverId: CANTOR }, to: { agentId: "probe-id", address: "probe@m2-max", serverId: MAC } });
-}
-
-/** The fields a hand-off digest covers, in its order; written out here rather than read from production (as in outbox.test.ts). */
-function digestFields(mail: Mail): unknown[] {
-  return [mail.id, mail.threadId, mail.inReplyTo, mail.from.agentId, mail.from.name, mail.from.title, mail.from.serverId, mail.to.address, mail.subject, mail.body, mail.createdAt];
-}
-
-/** The record a hand-off writes on the sending agent for `mail` dropped on `agentId` at `serverId`, computed here. */
-function recordOf(mail: Mail, serverId: string, agentId: string): { to: { serverId: string; agentId: string }; digest: string } {
-  return { to: { serverId, agentId }, digest: createHash("sha256").update(JSON.stringify(digestFields(mail))).digest("hex") };
 }
 
 /**
@@ -830,12 +819,6 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
 // paseo-mail#qkf2 Task 2: the importer stores a drop only when its claimed sender host holds a
 // matching hand-off record (design "Import order", acceptance 3-7). In every test the holder is
 // probe-id on the Mac and the claimed sender lead-id on cantor.
-
-/** A mail's keys, and its from's and to's, in reverse order: the same mail as JSON in another key order. */
-function reversedKeys(mail: Mail): Record<string, unknown> {
-  const flip = (value: object) => Object.fromEntries(Object.entries(value).reverse());
-  return flip({ ...mail, from: flip(mail.from), to: flip(mail.to) });
-}
 
 describe("importDrops: the claimed sender host confirms the hand-off (paseo-mail#qkf2)", () => {
   // A raw write puts a drop on probe claiming lead on cantor; cantor holds no record of it, and a

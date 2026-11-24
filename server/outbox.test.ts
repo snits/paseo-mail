@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ATTIC, CANTOR, DROP_PREFIX, MAC, OUT_PREFIX, mailOf, linkedHosts, park, publish, reportHost, setup, setupPair, until, wait, type FakeNetwork, type FakePaseo } from "../test/fixtures";
+import { ATTIC, CANTOR, DROP_PREFIX, MAC, OUT_PREFIX, digestOf, mailOf, linkedHosts, park, publish, recordOf, reportHost, reversedKeys, setup, setupPair, sha256, until, wait, type FakeNetwork, type FakePaseo } from "../test/fixtures";
 import { handOffDigest, type Mailer, type MailerOptions } from "./mailer";
-import { UserError, type Mail } from "./types";
+import { UserError, type HandOffRecord, type Mail } from "./types";
 
 // Task 5 of paseo-mail#xsbz: outbox writers and hand-off (design steps 6, 7, 9 and 11).
 
@@ -930,16 +929,6 @@ describe("hand-off triggers and lifecycle (design steps 7 and 11)", () => {
 
 // paseo-mail#qkf2 Task 1: before each drop write, the hand-off writes a record on the sending agent.
 
-/** The fields a hand-off digest covers, in its order; written out here rather than read from production. */
-function digestFields(mail: Mail): unknown[] {
-  return [mail.id, mail.threadId, mail.inReplyTo, mail.from.agentId, mail.from.name, mail.from.title, mail.from.serverId, mail.to.address, mail.subject, mail.body, mail.createdAt];
-}
-
-const sha256 = (fields: unknown[]): string => createHash("sha256").update(JSON.stringify(fields)).digest("hex");
-
-/** The digest the record of `mail` must carry, computed here. */
-const digestOf = (mail: Mail): string => sha256(digestFields(mail));
-
 /** The recordHandOff calls a port recorded, in order. */
 function records(paseo: FakePaseo): { agentId: unknown; mailId: unknown; record: unknown }[] {
   return paseo.calls.filter((call) => call.op === "recordHandOff").map((call) => ({ agentId: call.args[0], mailId: call.args[1], record: call.args[2] }));
@@ -981,9 +970,9 @@ async function sender() {
 }
 
 /** The record lead's m_001 to probe-id on the Mac must carry, from outMail's fields and cantor's serverId. */
-function recordOfM001(): { to: { serverId: string; agentId: string }; digest: string } {
+function recordOfM001(): HandOffRecord {
   const drop = outMail("m_001", MAC, "probe-id", "probe@m2-max");
-  return { to: { serverId: MAC, agentId: "probe-id" }, digest: digestOf({ ...drop, from: { ...drop.from, serverId: CANTOR } }) };
+  return recordOf({ ...drop, from: { ...drop.from, serverId: CANTOR } }, MAC, "probe-id");
 }
 
 describe("hand-off record (paseo-mail#qkf2)", () => {
@@ -1007,7 +996,7 @@ describe("hand-off record (paseo-mail#qkf2)", () => {
     });
     await cantor.store.create(stored);
     await cantor.mailer.flushOutbox();
-    const expected = { to: { serverId: MAC, agentId: "probe-id" }, digest: digestOf({ ...stored, from: { ...stored.from, serverId: CANTOR } }) };
+    const expected = recordOf({ ...stored, from: { ...stored.from, serverId: CANTOR } }, MAC, "probe-id");
     expect(expected.digest).not.toBe(digestOf(stored));
     expect(records(cantor.paseo)).toStrictEqual([{ agentId: "lead-id", mailId: "m_001", record: expected }]);
     expect(cantor.paseo.metadata.get("lead-id")?.[`${OUT_PREFIX}m_001`]).toStrictEqual(expected);
@@ -1205,7 +1194,7 @@ describe("handOffDigest (paseo-mail#qkf2)", () => {
     // The fixture tells those orders apart.
     expect(EXPECTED).not.toBe(sha256(swapped(8, 9)));
     expect(EXPECTED).not.toBe(sha256(swapped(4, 5)));
-    expect(EXPECTED).not.toBe(createHash("sha256").update(JSON.stringify(MAIL)).digest("hex"));
+    expect(EXPECTED).not.toBe(sha256(MAIL));
     expect(handOffDigest(MAIL)).toBe(EXPECTED);
     expect(handOffDigest(MAIL)).toMatch(/^[0-9a-f]{64}$/);
     // Swapping the subject and body values gives the digest of the swapped list.
@@ -1239,8 +1228,7 @@ describe("handOffDigest (paseo-mail#qkf2)", () => {
   // the stamped copy differ).
   it("ignores to.agentId, to.serverId, the stamps and the key order of the mail object", () => {
     const withStamps = { ...MAIL, to: { ...MAIL.to, agentId: "other-id", serverId: null }, readAt: "2026-11-23T09:00:00.000Z", nudgedAt: "2026-11-23T09:01:00.000Z", bouncedAt: "2026-11-23T09:02:00.000Z", seenAt: "2026-11-23T09:03:00.000Z", handedOffAt: "2026-11-23T09:04:00.000Z" };
-    const reversed = <T extends object>(value: T): T => Object.fromEntries(Object.entries(value).reverse()) as T;
-    const reordered = reversed({ ...MAIL, from: reversed(MAIL.from), to: reversed(MAIL.to) });
+    const reordered = reversedKeys(MAIL);
     expect(JSON.stringify(reordered)).not.toBe(JSON.stringify(MAIL));
     expect(handOffDigest(withStamps)).toBe(EXPECTED);
     expect(handOffDigest(reordered)).toBe(EXPECTED);

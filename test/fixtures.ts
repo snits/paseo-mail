@@ -1,4 +1,5 @@
 import type { AgentToolContext } from "@getpaseo/plugin/server";
+import { createHash } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -410,6 +411,27 @@ export function mailOf(fields: Pick<Mail, "id" | "from" | "to"> & Partial<Mail>)
     handedOffAt: null,
     ...rest,
   };
+}
+
+/** Lowercase hex SHA-256 of `JSON.stringify(value)`. */
+export function sha256(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+/** The digest a hand-off record carries for `mail`: its kept fields in their fixed order, written out here rather than read from production. */
+export function digestOf(mail: Mail): string {
+  return sha256([mail.id, mail.threadId, mail.inReplyTo, mail.from.agentId, mail.from.name, mail.from.title, mail.from.serverId, mail.to.address, mail.subject, mail.body, mail.createdAt]);
+}
+
+/** The record a hand-off writes on the sending agent for `mail` dropped on `agentId` at `serverId`, computed here. */
+export function recordOf(mail: Mail, serverId: string, agentId: string): HandOffRecord {
+  return { to: { serverId, agentId }, digest: digestOf(mail) };
+}
+
+/** The same mail with its keys, and its from's and to's, in reverse order: equal as data, different as JSON. */
+export function reversedKeys(mail: Mail): Mail {
+  const flip = <T extends object>(value: T): T => Object.fromEntries(Object.entries(value).reverse()) as T;
+  return flip({ ...mail, from: flip(mail.from), to: flip(mail.to) });
 }
 
 export const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

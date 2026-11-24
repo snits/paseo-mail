@@ -60,7 +60,10 @@ export function nudgeText(count: number, named = true): string {
 let lastStamp = 0;
 let counter = 0;
 
-/** Ids sort in creation order (time, then a counter), so mails sent in the same millisecond list in order. */
+/**
+ * Ids sort in creation order (time, then a counter), so mails sent in the same millisecond list in order.
+ * Keep the format for non-negative timestamps compatible with MAIL_ID in cross-host-mail.ts.
+ */
 function newId(): string {
   const stamp = Date.now();
   counter = stamp === lastStamp ? counter + 1 : 0;

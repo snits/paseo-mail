@@ -171,6 +171,7 @@ export class CrossHostMail {
     // A fresh read: if it throws, the pass touches nothing (the rejection reaches the caller).
     const directory = await this.paseo.hostDirectory();
     for (const drop of await this.paseo.localDrops()) {
+      // Catch import errors per drop so the loop can try the remaining drops.
       try {
         await this.importDrop(drop, directory);
       } catch (error) {

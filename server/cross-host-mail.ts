@@ -30,7 +30,7 @@ export function handOffDigest(mail: Mail): string {
 }
 
 export class CrossHostMail {
-  /** Hand-off passes run one at a time, so no drop is written twice. */
+  /** Hand-off passes run one at a time, so each reads the outbox after the preceding pass settles. */
   private readonly handOffs = new Queue();
   /** Import passes run one at a time, so no drop is stored twice. */
   private readonly imports = new Queue();
@@ -155,8 +155,9 @@ export class CrossHostMail {
   /**
    * Stores one drop in the holder's inbox, leaves it for a later pass (park), or clears it unstored.
    * A drop is stored only when its claimed sender's agent holds a matching hand-off record (naming
-   * this host and the holder, with the digest of this mail); otherwise it is cleared unstored and
-   * nothing is written to the claimed host. After storing, the record is cleared, then the drop.
+   * this host and the holder, with the digest of this mail). When it clears an unconfirmed drop,
+   * it writes nothing to the claimed host. After storing, it attempts to clear the sender's
+   * record before clearing the local drop.
    */
   private async importDrop(drop: Drop, directory: HostDirectoryView): Promise<void> {
     const where = `mail ${drop.mailId} on ${drop.agentId}`;

@@ -641,22 +641,27 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     expect(stamped(cantor.store, "m_001")).toBe(true);
   });
 
-  // m_002 is stored while the first pass is parked on m_001's write. Wrong: a second call joining the
-  // pass already running (it read the outbox before m_002 existed, so m_002 waits for the sweep).
-  it("a flush called while a pass runs hands off mail stored after that pass began", async () => {
+  // Wrong: joining the running pass leaves m_002 waiting; an ordinary FIFO does a directory read
+  // for every request; concurrent passes read the directory again while the first write is parked.
+  it("coalesces a burst of flushes into one later pass that hands off late mail", async () => {
     const { cantor, mac } = await linked();
     publish(mac.paseo, "probe-id", "probe");
     await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
     const write = park(cantor.paseo, "writeDrop");
     held.push(write.open);
+    const mark = cantor.paseo.calls.length;
+    const starts = () => cantor.paseo.calls.slice(mark).filter((call) => call.op === "hostDirectory");
     const first = quiet(cantor.mailer.flushOutbox());
     expect(await until(() => write.parked >= 1)).toBe(true);
     await cantor.store.create(outMail("m_002", MAC, "probe-id", "probe@m2-max"));
-    const second = quiet(cantor.mailer.flushOutbox());
+    const burst = Array.from({ length: 4 }, () => quiet(cantor.mailer.flushOutbox().then(() => {
+      expect(stamped(cantor.store, "m_002")).toBe(true);
+    })));
+    await wait(0);
+    expect(starts()).toHaveLength(1);
     write.open();
-    await second;
-    await first;
-    expect(stamped(cantor.store, "m_002")).toBe(true);
+    await Promise.all([first, ...burst]);
+    expect(starts()).toHaveLength(2);
     expect(writes(cantor.paseo).map((write) => write.mail.id)).toEqual(["m_001", "m_002"]);
   });
 
@@ -671,14 +676,17 @@ describe("hand-off: flushOutbox (design step 7)", () => {
     await cantor.store.create(outMail("m_001", MAC, "probe-id", "probe@m2-max"));
     const write = park(cantor.paseo, "writeDrop");
     held.push(write.open);
+    const mark = cantor.paseo.calls.length;
     const first = quiet(cantor.mailer.flushOutbox());
     expect(await until(() => write.parked >= 1)).toBe(true);
     await cantor.store.create(outMail("m_002", MAC, "other-id", "other@m2-max"));
     const second = quiet(cantor.mailer.flushOutbox());
+    const third = quiet(cantor.mailer.flushOutbox());
     const disposed = disposing ? cantor.mailer.dispose() : Promise.resolve();
     write.open();
-    await Promise.allSettled([first, second]);
+    await Promise.all([first, second, third]);
     await disposed;
+    expect(cantor.paseo.calls.slice(mark).filter((call) => call.op === "hostDirectory")).toHaveLength(disposing ? 1 : 2);
     const aboutOther = peerCalls(cantor.paseo).filter(([, , agentId]) => agentId === "other-id");
     if (disposing) expect(aboutOther).toEqual([]);
     else expect(aboutOther).toEqual([

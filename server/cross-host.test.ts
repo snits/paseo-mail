@@ -2,6 +2,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ATTIC, CANTOR, DROP_PREFIX, MAC, OUT_PREFIX, linkedHosts, mailOf, park, recordOf, reportHost, reversedKeys, setup, setupPair, toolContext, until, wait, type Env, type FakeNetwork, type FakePaseo } from "../test/fixtures";
+import { CrossHostMail } from "./cross-host-mail";
 import type { Mailer, MailerOptions } from "./mailer";
 import { mailTools } from "./tools";
 import type { Mail } from "./types";
@@ -648,6 +649,66 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     expect(mac.store.all().map((mail) => mail.id)).toEqual(["m_100"]);
   });
 
+  // Wrong: joining the running pass leaves m_002 waiting; a FIFO lists drops for every request;
+  // concurrent passes list drops again while the first pass is parked after the snapshot.
+  it("coalesces a burst of imports into one later pass that stores late mail", async () => {
+    const { mac } = await pairOf();
+    place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
+    const listing = park(mac.paseo, "localDrops", { after: true });
+    const mark = mac.paseo.calls.length;
+    const starts = () => mac.paseo.calls.slice(mark).filter((call) => call.op === "localDrops");
+    try {
+      const first = mac.mailer.importDrops();
+      expect(await until(() => listing.parked === 1)).toBe(true);
+      place(mac.paseo, "probe-id", "m_002", dropped("m_002"));
+      const burst = Array.from({ length: 4 }, () => mac.mailer.importDrops().then(() => {
+        expect(mac.store.get("m_002")?.to.agentId).toBe("probe-id");
+      }));
+      await wait(0);
+      listing.open();
+      await Promise.all([first, ...burst]);
+      expect(listing.parked).toBe(1);
+      expect(starts()).toHaveLength(2);
+      expect(clears(mac.paseo)).toEqual([["probe-id", "m_001"], ["probe-id", "m_002"]]);
+    } finally {
+      listing.open();
+    }
+  });
+
+  // Wrong: each follower runs separately (only the first sees the rejected listing); a rejected
+  // pass poisons the lane (the waiting recovery rejects and m_002 stays outside the store).
+  it("every request sharing a waiting import sees its rejection and the next pass still imports", async () => {
+    const { mac } = await pairOf();
+    place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
+    const lookup = park(mac.paseo, "peerAgent");
+    try {
+      const first = mac.mailer.importDrops();
+      expect(await until(() => lookup.parked === 1)).toBe(true);
+      place(mac.paseo, "probe-id", "m_002", dropped("m_002"));
+      const followers = Promise.allSettled([mac.mailer.importDrops(), mac.mailer.importDrops()]);
+      const listing = park(mac.paseo, "localDrops", { after: true });
+      try {
+        lookup.open();
+        await first;
+        expect(await until(() => listing.parked >= 1)).toBe(true);
+        const recovery = Promise.allSettled([mac.mailer.importDrops()]);
+        const refused = new Error("listing refused");
+        listing.refuse(refused);
+        const results = await followers;
+        expect(await recovery).toEqual([{ status: "fulfilled", value: undefined }]);
+        expect(mac.store.get("m_002")?.to.agentId).toBe("probe-id");
+        expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+        for (const result of results) {
+          if (result.status === "rejected") expect(result.reason).toBe(refused);
+        }
+      } finally {
+        listing.open();
+      }
+    } finally {
+      lookup.open();
+    }
+  });
+
   // Wrong: a pass that swallows a localDrops() throw (resolves as if there were no drops).
   it("rejects when listing the local drops throws", async () => {
     const { mac } = await pairOf();
@@ -665,14 +726,17 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
     cantor.paseo.add("lead2-id");
     place(mac.paseo, "probe-id", "m_001", dropped("m_001"));
     const listing = park(mac.paseo, "localDrops", { after: true });
-    const first = mac.mailer.importDrops().catch(() => undefined);
+    const mark = mac.paseo.calls.length;
+    const first = mac.mailer.importDrops();
     try {
       expect(await until(() => listing.parked === 1)).toBe(true);
       place(mac.paseo, "probe-id", "m_002", { ...dropped("m_002"), from: { agentId: "lead2-id", name: "lead2", title: null, serverId: CANTOR } });
-      const second = mac.mailer.importDrops().catch(() => undefined);
+      const second = mac.mailer.importDrops();
+      const third = mac.mailer.importDrops();
       const disposed = disposing ? mac.mailer.dispose() : Promise.resolve();
       listing.open();
-      await Promise.all([first, second, disposed]);
+      await Promise.all([first, second, third, disposed]);
+      expect(mac.paseo.calls.slice(mark).filter((call) => call.op === "hostDirectory")).toHaveLength(disposing ? 1 : 2);
     } finally {
       listing.open();
     }
@@ -833,6 +897,48 @@ describe("importDrops: duplicate vs failure (design step 8)", () => {
       expect(mac.store.get("m_050")?.handedOffAt).not.toBeNull();
     } finally {
       write.open();
+    }
+  });
+
+  // Wrong: idle only tracks the running pass (it resolves while the second is parked); idle keeps
+  // following requests after the call (it waits for the third pass). Opening each gate is the
+  // positive control for the corresponding idle promise.
+  it.each(["import", "hand-off"] as const)("%s idle waits for the running and waiting passes at the call", async (lane) => {
+    const { mac } = await pairOf();
+    const crossHost = new CrossHostMail(mac.store, mac.paseo, () => "2026-11-23T00:00:00Z", () => undefined);
+    const run = () => lane === "import" ? crossHost.importDrops() : crossHost.flushOutbox();
+    const idle = () => lane === "import" ? crossHost.importIdle() : crossHost.handOffIdle();
+    const firstGate = park(mac.paseo, "hostDirectory");
+    const gates = [firstGate];
+    try {
+      const first = run();
+      expect(await until(() => firstGate.parked === 1)).toBe(true);
+      const second = run();
+      let settled = false;
+      const both = idle().then(() => { settled = true; });
+      await wait(0);
+      expect(settled).toBe(false);
+
+      firstGate.open();
+      const secondGate = park(mac.paseo, "hostDirectory");
+      gates.push(secondGate);
+      await first;
+      expect(await until(() => secondGate.parked === 1)).toBe(true);
+      await wait(0);
+      expect(settled).toBe(false);
+
+      const third = run();
+      secondGate.open();
+      const thirdGate = park(mac.paseo, "hostDirectory");
+      gates.push(thirdGate);
+      await second;
+      expect(await until(() => thirdGate.parked === 1)).toBe(true);
+      expect(await Promise.race([both.then(() => "settled"), wait(1000).then(() => "pending")])).toBe("settled");
+      thirdGate.open();
+      await third;
+    } finally {
+      for (const gate of gates) gate.open();
+      await idle();
     }
   });
 });

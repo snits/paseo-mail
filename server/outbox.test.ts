@@ -155,17 +155,17 @@ describe("cross-host subject and body cap (paseo-mail#6d9k)", () => {
   const subjectHalf = "€".repeat(5461) + "x";
   const bodyHalf = "🙂".repeat(4096);
 
-  // Each oversized fixture fits in UTF-16LE, and the split fixture fits if fields are capped separately.
+  // The split content fits under separate limits. Surrogate halves must be encoded as separate fields.
   it.each([
     { kind: "subject only", subject: subjectHalf.repeat(2), body: "", extraSubject: "x", extraBody: "" },
     { kind: "body only", subject: "", body: subjectHalf.repeat(2), extraSubject: "", extraBody: "x" },
     { kind: "subject and body", subject: subjectHalf, body: bodyHalf, extraSubject: "", extraBody: "x" },
+    { kind: "fields with split surrogate halves", subject: "x".repeat(32762) + "\uD83D", body: "\uDE42", extraSubject: "x", extraBody: "" },
   ])("accepts exactly 32 KiB in the $kind and refuses one byte more", async ({ subject, body, extraSubject, extraBody }) => {
-    expect(Buffer.byteLength(subject + body, "utf8")).toBe(32768);
-    const oversizedSubject = subject + extraSubject;
+    expect(Buffer.byteLength(subject, "utf8") + Buffer.byteLength(body, "utf8")).toBe(32768);
+    const oversizedSubject = extraSubject + subject;
     const oversizedBody = body + extraBody;
-    expect(Buffer.byteLength(oversizedSubject + oversizedBody, "utf8")).toBe(32769);
-    expect(Buffer.byteLength(oversizedSubject + oversizedBody, "utf16le")).toBeLessThan(32768);
+    expect(Buffer.byteLength(oversizedSubject, "utf8") + Buffer.byteLength(oversizedBody, "utf8")).toBe(32769);
     const { network, cantor, lead } = await linked();
     network.setReachable(CANTOR, MAC, false);
     const to = ["probe@m2-max"];
@@ -202,18 +202,22 @@ describe("cross-host subject and body cap (paseo-mail#6d9k)", () => {
   it("refuses a 1 MiB subject in a remote send with a short body", async () => {
     const { network, cantor, lead } = await linked();
     network.setReachable(CANTOR, MAC, false);
-    await expect.soft(cantor.mailer.send(lead, ["probe@m2-max"], "s".repeat(1048576), "b")).rejects.toBeInstanceOf(UserError);
+    const refused = cantor.mailer.send(lead, ["probe@m2-max"], "s".repeat(1048576), "b");
+    await expect.soft(refused).rejects.toBeInstanceOf(UserError);
+    await expect.soft(refused).rejects.toThrow(/subject and body.*32768 bytes/i);
     expect(cantor.store.all().map((mail) => mail.id)).toEqual([]);
   });
 
-  // The original subject plus either body fits. The generated "Re: " prefix counts toward the cap.
-  it("includes the generated subject when checking a reply to a remote sender", async () => {
+  it.each([
+    { kind: "a generated prefix", prefix: "", replyPrefix: "Re: " },
+    { kind: "an existing prefix", prefix: "re: ", replyPrefix: "" },
+  ])("includes the reply subject with $kind in the cross-host cap", async ({ prefix, replyPrefix }) => {
     const { network, cantor, lead } = await linked();
     network.setReachable(CANTOR, MAC, false);
     const original = fromMac("m_in", { agentId: "probe-id", name: "probe", title: "Probe" });
-    original.subject = "é".repeat(16381);
+    original.subject = prefix + "é".repeat(16381);
     await cantor.store.create(original);
-    const subject = `Re: ${original.subject}`;
+    const subject = replyPrefix + original.subject;
     expect(Buffer.byteLength(subject + "é", "utf8")).toBe(32768);
     expect(Buffer.byteLength(subject + "éx", "utf8")).toBe(32769);
     const before = cantor.store.revision;
@@ -223,6 +227,18 @@ describe("cross-host subject and body cap (paseo-mail#6d9k)", () => {
     const delivery = await cantor.mailer.reply(lead, "m_in", "é");
     expect(delivery).toMatchObject({ serverId: MAC, agentId: "probe-id" });
     expect(cantor.store.get(delivery.mailId)).toMatchObject({ subject, body: "é" });
+  });
+
+  it("allows an oversized reply to a live local sender", async () => {
+    const { cantor, lead } = await linked();
+    const bob = cantor.paseo.add("bob-id", { title: "Bob" });
+    const [original] = await cantor.mailer.send(bob, ["lead"], "Question", "?");
+    const body = "x".repeat(32769);
+
+    const delivery = await cantor.mailer.reply(lead, original!.mailId, body);
+
+    expect(delivery).toMatchObject({ agentId: "bob-id", serverId: null });
+    expect(cantor.mailer.list("bob-id")).toMatchObject([{ id: delivery.mailId, subject: "Re: Question", body }]);
   });
 });
 

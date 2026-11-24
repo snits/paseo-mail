@@ -1144,19 +1144,19 @@ describe("importDrops: the claimed sender host confirms the hand-off (paseo-mail
 describe("importDrops: cross-host subject and body cap (paseo-mail#6d9k)", () => {
   const half = "€".repeat(5461) + "x";
 
-  // The two fields of the split fixture each fit, and all oversized fixtures fit in UTF-16LE.
+  // The split content fits under separate limits. Surrogate halves must be encoded as separate fields.
   it.each([
     { kind: "subject only", subject: half.repeat(2), body: "", extraSubject: "x", extraBody: "" },
     { kind: "body only", subject: "", body: half.repeat(2), extraSubject: "", extraBody: "x" },
     { kind: "subject and body", subject: half, body: half, extraSubject: "", extraBody: "x" },
+    { kind: "fields with split surrogate halves", subject: "x".repeat(32762) + "\uD83D", body: "\uDE42", extraSubject: "x", extraBody: "" },
   ])("imports exactly 32 KiB in the $kind and clears an oversized drop without storing it", async ({ subject, body, extraSubject, extraBody }) => {
     const { cantor, mac } = await pairOf();
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const atLimit = { ...dropped("m_atlimit"), subject, body };
-    const oversized = { ...dropped("m_oversized"), subject: subject + extraSubject, body: body + extraBody };
-    expect(Buffer.byteLength(atLimit.subject + atLimit.body, "utf8")).toBe(32768);
-    expect(Buffer.byteLength(oversized.subject + oversized.body, "utf8")).toBe(32769);
-    expect(Buffer.byteLength(oversized.subject + oversized.body, "utf16le")).toBeLessThan(32768);
+    const oversized = { ...dropped("m_oversized"), subject: extraSubject + subject, body: body + extraBody };
+    expect(Buffer.byteLength(atLimit.subject, "utf8") + Buffer.byteLength(atLimit.body, "utf8")).toBe(32768);
+    expect(Buffer.byteLength(oversized.subject, "utf8") + Buffer.byteLength(oversized.body, "utf8")).toBe(32769);
     place(mac.paseo, "probe-id", atLimit.id, atLimit);
     place(mac.paseo, "probe-id", oversized.id, oversized);
     const oversizedRecord = recordOf(oversized, MAC, "probe-id");
@@ -1171,6 +1171,21 @@ describe("importDrops: cross-host subject and body cap (paseo-mail#6d9k)", () =>
     expect.soft(recordOn(cantor.paseo, "lead-id", atLimit.id)).toBeUndefined();
     expect.soft(recordOn(cantor.paseo, "lead-id", oversized.id)).toStrictEqual(oversizedRecord);
     expect(logLines(errors)).toEqual([expect.stringMatching(/\[paseo-mail\].*m_oversized.*(?:byte|limit|large|size)/i)]);
+  });
+
+  it("clears an oversized unconfirmed drop for its missing hand-off record", async () => {
+    const { cantor, mac } = await pairOf();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const mail = { ...dropped("m_unconfirmed"), subject: half, body: half + "x" };
+    forge(mac.paseo, "probe-id", mail.id, mail);
+
+    await mac.mailer.importDrops();
+
+    expect.soft(mac.store.all()).toEqual([]);
+    expect.soft(hasDrop(mac.paseo, "probe-id", mail.id)).toBe(false);
+    expect.soft(recordClears(mac.paseo)).toEqual([]);
+    expect.soft(outKeys(cantor.paseo, "lead-id")).toEqual([]);
+    expect(logLines(errors)).toEqual([expect.stringMatching(/\[paseo-mail\].*m_unconfirmed.*no matching hand-off record/i)]);
   });
 
   // A duplicate still acknowledges its matching record when its content exceeds the cap.

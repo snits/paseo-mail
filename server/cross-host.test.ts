@@ -1141,6 +1141,59 @@ describe("importDrops: the claimed sender host confirms the hand-off (paseo-mail
   });
 });
 
+describe("importDrops: cross-host subject and body cap (paseo-mail#6d9k)", () => {
+  const half = "€".repeat(5461) + "x";
+
+  // The two fields of the split fixture each fit, and all oversized fixtures fit in UTF-16LE.
+  it.each([
+    { kind: "subject only", subject: half.repeat(2), body: "", extraSubject: "x", extraBody: "" },
+    { kind: "body only", subject: "", body: half.repeat(2), extraSubject: "", extraBody: "x" },
+    { kind: "subject and body", subject: half, body: half, extraSubject: "", extraBody: "x" },
+  ])("imports exactly 32 KiB in the $kind and clears an oversized drop without storing it", async ({ subject, body, extraSubject, extraBody }) => {
+    const { cantor, mac } = await pairOf();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const atLimit = { ...dropped("m_atlimit"), subject, body };
+    const oversized = { ...dropped("m_oversized"), subject: subject + extraSubject, body: body + extraBody };
+    expect(Buffer.byteLength(atLimit.subject + atLimit.body, "utf8")).toBe(32768);
+    expect(Buffer.byteLength(oversized.subject + oversized.body, "utf8")).toBe(32769);
+    expect(Buffer.byteLength(oversized.subject + oversized.body, "utf16le")).toBeLessThan(32768);
+    place(mac.paseo, "probe-id", atLimit.id, atLimit);
+    place(mac.paseo, "probe-id", oversized.id, oversized);
+    const oversizedRecord = recordOf(oversized, MAC, "probe-id");
+
+    await mac.mailer.importDrops();
+
+    expect.soft(mac.store.get(atLimit.id)).toMatchObject({ subject, body, to: { agentId: "probe-id", serverId: null } });
+    expect.soft(mac.store.all().map((mail) => mail.id)).toEqual([atLimit.id]);
+    expect.soft(hasDrop(mac.paseo, "probe-id", atLimit.id)).toBe(false);
+    expect.soft(hasDrop(mac.paseo, "probe-id", oversized.id)).toBe(false);
+    expect.soft(recordClears(mac.paseo)).toEqual([[CANTOR, "lead-id", atLimit.id]]);
+    expect.soft(recordOn(cantor.paseo, "lead-id", atLimit.id)).toBeUndefined();
+    expect.soft(recordOn(cantor.paseo, "lead-id", oversized.id)).toStrictEqual(oversizedRecord);
+    expect(logLines(errors)).toEqual([expect.stringMatching(/\[paseo-mail\].*m_oversized.*(?:byte|limit|large|size)/i)]);
+  });
+
+  // A duplicate still acknowledges its matching record when its content exceeds the cap.
+  it("clears both the drop and the sender record for an oversized mail already stored", async () => {
+    const { cantor, mac } = await pairOf();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const mail = { ...dropped("m_oversizedduplicate"), subject: half, body: half + "x" };
+    const stored = { ...mail, to: { agentId: "probe-id", address: "probe", serverId: null } };
+    await mac.store.create(stored);
+    const before = mac.store.revision;
+    place(mac.paseo, "probe-id", mail.id, mail);
+
+    await mac.mailer.importDrops();
+
+    expect.soft(mac.store.all()).toEqual([stored]);
+    expect.soft(mac.store.revision).toBe(before);
+    expect.soft(hasDrop(mac.paseo, "probe-id", mail.id)).toBe(false);
+    expect.soft(recordClears(mac.paseo)).toEqual([[CANTOR, "lead-id", mail.id]]);
+    expect.soft(recordOn(cantor.paseo, "lead-id", mail.id)).toBeUndefined();
+    expect(logLines(errors)).toEqual([]);
+  });
+});
+
 describe("import triggers (design step 8)", () => {
   // The drop is there before start(); the sweep is the default 60 s and no watcher fires.
   // Wrong: start() without an import pass.

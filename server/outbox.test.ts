@@ -5,9 +5,6 @@ import { UserError, type HandOffRecord, type Mail } from "./types";
 
 // Task 5 of paseo-mail#xsbz: outbox writers and hand-off (design steps 6, 7, 9 and 11).
 
-/** The cross-host body cap in UTF-8 bytes, written out here rather than read from CROSS_HOST_BODY_LIMIT. */
-const LIMIT = 32768;
-
 const mailers: Mailer[] = [];
 const held: (() => void)[] = [];
 afterEach(async () => {
@@ -154,29 +151,30 @@ describe("dedup key of remote targets", () => {
   });
 });
 
-describe("cross-host body cap (design step 6)", () => {
-  // "€" is 3 UTF-8 bytes and 1 UTF-16 unit; "é" is 2 bytes and 1 unit. Wrong measures: `.length`
-  // (10923 for both bodies, so both accepted); UTF-16LE bytes (21846 for both, both accepted).
-  // Wrong limits: `<` for `<=`, or 32 * 1000 (AT_CAP refused); LIMIT + 1 (OVER_CAP accepted).
-  const AT_CAP = "€".repeat(10922) + "é";
-  const OVER_CAP = "€".repeat(10923);
+describe("cross-host subject and body cap (paseo-mail#6d9k)", () => {
+  const subjectHalf = "€".repeat(5461) + "x";
+  const bodyHalf = "🙂".repeat(4096);
 
-  it("accepts a remote body of exactly 32 KiB and refuses one byte more, storing nothing", async () => {
-    // The fixtures straddle the limit in UTF-8 bytes, not in UTF-16 units or UTF-16LE bytes.
-    expect(Buffer.byteLength(AT_CAP, "utf8")).toBe(LIMIT);
-    expect(Buffer.byteLength(OVER_CAP, "utf8")).toBe(LIMIT + 1);
-    expect(AT_CAP.length).toBe(10923);
-    expect(OVER_CAP.length).toBe(10923);
-    expect(Buffer.byteLength(OVER_CAP, "utf16le")).toBeLessThan(LIMIT);
+  // Each oversized fixture fits in UTF-16LE, and the split fixture fits if fields are capped separately.
+  it.each([
+    { kind: "subject only", subject: subjectHalf.repeat(2), body: "", extraSubject: "x", extraBody: "" },
+    { kind: "body only", subject: "", body: subjectHalf.repeat(2), extraSubject: "", extraBody: "x" },
+    { kind: "subject and body", subject: subjectHalf, body: bodyHalf, extraSubject: "", extraBody: "x" },
+  ])("accepts exactly 32 KiB in the $kind and refuses one byte more", async ({ subject, body, extraSubject, extraBody }) => {
+    expect(Buffer.byteLength(subject + body, "utf8")).toBe(32768);
+    const oversizedSubject = subject + extraSubject;
+    const oversizedBody = body + extraBody;
+    expect(Buffer.byteLength(oversizedSubject + oversizedBody, "utf8")).toBe(32769);
+    expect(Buffer.byteLength(oversizedSubject + oversizedBody, "utf16le")).toBeLessThan(32768);
     const { network, cantor, lead } = await linked();
     network.setReachable(CANTOR, MAC, false);
-    const [delivery] = await cantor.mailer.send(lead, ["probe@m2-max"], "s", AT_CAP);
-    expect(cantor.store.get(delivery!.mailId)?.body).toBe(AT_CAP);
+    const to = ["probe@m2-max"];
+    const [delivery] = await cantor.mailer.send(lead, to, subject, body);
+    expect(cantor.store.get(delivery!.mailId)).toMatchObject({ subject, body });
     const before = cantor.store.revision;
-    const error = await cantor.mailer.send(lead, ["probe@m2-max"], "s", OVER_CAP).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(UserError);
-    expect(cantor.store.revision).toBe(before);
-    expect(cantor.store.all()).toHaveLength(1);
+    await expect.soft(cantor.mailer.send(lead, to, oversizedSubject, oversizedBody)).rejects.toBeInstanceOf(UserError);
+    expect.soft(cantor.store.revision).toBe(before);
+    expect(cantor.store.outbox().map((mail) => mail.id)).toEqual([delivery!.mailId]);
   });
 
   // Wrong: checking the cap per copy as it is stored (bob's local copy lands first); capping every
@@ -185,30 +183,46 @@ describe("cross-host body cap (design step 6)", () => {
     const { network, cantor, lead } = await linked();
     await cantor.mailer.register(cantor.paseo.add("bob-id", { title: "Bob" }), { name: "bob" });
     network.setReachable(CANTOR, MAC, false);
+    const oversizedBody = bodyHalf + "x";
     const before = cantor.store.revision;
-    await expect(cantor.mailer.send(lead, ["bob", "probe@m2-max"], "s", OVER_CAP)).rejects.toBeInstanceOf(UserError);
-    expect(cantor.store.revision).toBe(before);
-    expect(cantor.store.all()).toEqual([]);
-    // Positive controls: the same body to bob alone, a far larger one, and the mixed send at the cap.
-    expect(await cantor.mailer.send(lead, ["bob"], "s", OVER_CAP)).toMatchObject([{ agentId: "bob-id", serverId: null }]);
-    expect(await cantor.mailer.send(lead, ["bob"], "s", "€".repeat(40_000))).toMatchObject([{ agentId: "bob-id" }]);
-    const mixed = await cantor.mailer.send(lead, ["bob", "probe@m2-max"], "s", AT_CAP);
+    await expect.soft(cantor.mailer.send(lead, ["bob", "probe@m2-max"], subjectHalf, oversizedBody)).rejects.toBeInstanceOf(UserError);
+    expect.soft(cantor.store.revision).toBe(before);
+    expect(cantor.store.all().map((mail) => mail.id)).toEqual([]);
+    // Bob alone can receive the same content, or a much larger subject and body.
+    expect(await cantor.mailer.send(lead, ["bob"], subjectHalf, oversizedBody)).toMatchObject([{ agentId: "bob-id", serverId: null }]);
+    const hugeSubject = "s".repeat(1048576);
+    const hugeBody = "€".repeat(40_000);
+    const [local] = await cantor.mailer.send(lead, ["bob"], hugeSubject, hugeBody);
+    expect(cantor.store.get(local!.mailId)).toMatchObject({ subject: hugeSubject, body: hugeBody });
+    const mixed = await cantor.mailer.send(lead, ["bob", "probe@m2-max"], subjectHalf, bodyHalf);
     expect(mixed.map((delivery) => delivery.serverId ?? "local").sort()).toEqual(["local", MAC]);
     expect(cantor.mailer.unreadCount("bob-id")).toBe(3);
   });
 
-  // Wrong: a reply path that skips the cap.
-  it("refuses a reply to a remote sender over the cap, and accepts one at the cap", async () => {
+  it("refuses a 1 MiB subject in a remote send with a short body", async () => {
     const { network, cantor, lead } = await linked();
     network.setReachable(CANTOR, MAC, false);
-    await cantor.store.create(fromMac("m_in", { agentId: "probe-id", name: "probe", title: "Probe" }));
+    await expect.soft(cantor.mailer.send(lead, ["probe@m2-max"], "s".repeat(1048576), "b")).rejects.toBeInstanceOf(UserError);
+    expect(cantor.store.all().map((mail) => mail.id)).toEqual([]);
+  });
+
+  // The original subject plus either body fits. The generated "Re: " prefix counts toward the cap.
+  it("includes the generated subject when checking a reply to a remote sender", async () => {
+    const { network, cantor, lead } = await linked();
+    network.setReachable(CANTOR, MAC, false);
+    const original = fromMac("m_in", { agentId: "probe-id", name: "probe", title: "Probe" });
+    original.subject = "é".repeat(16381);
+    await cantor.store.create(original);
+    const subject = `Re: ${original.subject}`;
+    expect(Buffer.byteLength(subject + "é", "utf8")).toBe(32768);
+    expect(Buffer.byteLength(subject + "éx", "utf8")).toBe(32769);
     const before = cantor.store.revision;
-    await expect(cantor.mailer.reply(lead, "m_in", OVER_CAP)).rejects.toBeInstanceOf(UserError);
-    expect(cantor.store.revision).toBe(before);
-    expect(cantor.store.all().map((mail) => mail.id)).toEqual(["m_in"]);
-    const delivery = await cantor.mailer.reply(lead, "m_in", AT_CAP);
+    await expect.soft(cantor.mailer.reply(lead, "m_in", "éx")).rejects.toBeInstanceOf(UserError);
+    expect.soft(cantor.store.revision).toBe(before);
+    expect.soft(cantor.store.all().map((mail) => mail.id)).toEqual(["m_in"]);
+    const delivery = await cantor.mailer.reply(lead, "m_in", "é");
     expect(delivery).toMatchObject({ serverId: MAC, agentId: "probe-id" });
-    expect(cantor.store.get(delivery.mailId)?.body).toBe(AT_CAP);
+    expect(cantor.store.get(delivery.mailId)).toMatchObject({ subject, body: "é" });
   });
 });
 

@@ -38,11 +38,30 @@ export function handOffDigest(mail: Mail): string {
   return createHash("sha256").update(JSON.stringify(fields)).digest("hex");
 }
 
+/** Runs one pass at a time and shares the waiting pass's result with its requesters. */
+class PassQueue {
+  private readonly queue = new Queue();
+  private waiting: Promise<void> | undefined;
+
+  constructor(private readonly pass: () => Promise<void>) {}
+
+  run(): Promise<void> {
+    return this.waiting ??= this.queue.run(() => {
+      this.waiting = undefined;
+      return this.pass();
+    });
+  }
+
+  idle(): Promise<void> {
+    return this.queue.idle();
+  }
+}
+
 export class CrossHostMail {
   /** Hand-off passes run one at a time, so each reads the outbox after the preceding pass settles. */
-  private readonly handOffs = new Queue();
+  private readonly handOffs = new PassQueue(() => this.handOff());
   /** Import passes run one at a time, so no drop is stored twice. */
-  private readonly imports = new Queue();
+  private readonly imports = new PassQueue(() => this.importPass());
   private disposed = false;
 
   constructor(
@@ -65,7 +84,7 @@ export class CrossHostMail {
   }
 
   flushOutbox(): Promise<void> {
-    return this.handOffs.run(() => this.handOff());
+    return this.handOffs.run();
   }
 
   private async handOff(): Promise<void> {
@@ -144,7 +163,7 @@ export class CrossHostMail {
   }
 
   importDrops(): Promise<void> {
-    return this.imports.run(() => this.importPass());
+    return this.imports.run();
   }
 
   private async importPass(): Promise<void> {

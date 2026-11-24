@@ -136,6 +136,35 @@ describe("contribute", () => {
     await cleanup();
   });
 
+  // Wrong: starting without a rejection handler, so the error escapes instead of being logged.
+  it("logs a rejected startup and still returns mail tools from the first hook", async () => {
+    const hooks = new Map<string, Handler>();
+    const server = { addHook: (name: string, handler: Handler) => (hooks.set(name, handler), () => hooks.delete(name)), handle: () => undefined } as unknown as PluginServerContext;
+    const context = { paseo: fakeApi([]), signal: new AbortController().signal };
+    const request = { agentId: "b", workspaceId: "w1", provider: "claude", cwd: "/tmp", reason: "create", purpose: "interactive", title: null, labels: {}, tools: [], env: {}, mcpServers: {} };
+    const error = new Error("startup failed");
+    const start = Mailer.prototype.start;
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cleanup = contribute(server) as () => Promise<void>;
+    const escaped: unknown[] = [];
+    const recordRejection = (reason: unknown) => escaped.push(reason);
+    process.on("unhandledRejection", recordRejection);
+    try {
+      // Vitest spies attach a rejection handler when recording promise settlements.
+      Mailer.prototype.start = async () => { throw error; };
+      const result = await hooks.get("agent.open.before")!({ request }, context) as { tools: { name: string }[] };
+      expect(result.tools.map((tool) => tool.name)).toContain("mail_send");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(escaped).toEqual([]);
+      expect(log.mock.calls).toEqual([["[paseo-mail] start failed:", error]]);
+    } finally {
+      process.off("unhandledRejection", recordRejection);
+      log.mockRestore();
+      Mailer.prototype.start = start;
+      await cleanup();
+    }
+  });
+
   // Wrong: awaiting start() in the first hook, so a slow backfill prevents tools from loading.
   it("returns mail tools from the first interactive open while the registry backfill is parked", async () => {
     const dataDir = path.join(process.env.PASEO_HOME!, "plugin-data", "lerenn", "mail");

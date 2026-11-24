@@ -44,6 +44,18 @@ describe("tools", () => {
     expect((await call("mail_list", {}, "a")).text).toContain("Re: Review");
   });
 
+  // Wrong: falling back to the typed address when the local recipient has no name.
+  it("reports the local recipient name separately from the address in mail_send", async () => {
+    const { call } = await tools();
+    const input = { to: "agent:b", subject: "s", body: "b" };
+    const unnamed = await call("mail_send", input, "a");
+    expect(unnamed.structuredContent).toMatchObject({ sent: [{ to: null, via: "agent:b" }] });
+
+    await call("mail_register", { name: "bob" }, "b");
+    const named = await call("mail_send", input, "a");
+    expect(named.structuredContent).toMatchObject({ sent: [{ to: "bob", via: "agent:b" }] });
+  });
+
   it("returns refusals as tool errors", async () => {
     const { call } = await tools();
     const result = await call("mail_send", { to: "nobody", subject: "s", body: "b" }, "a");

@@ -659,6 +659,15 @@ describe("remote addresses (design steps 5 and 6, resolution half)", () => {
 
   const unresolved = (serverId: string, name: string) => ({ kind: "remote", serverId, agentId: null, name, title: null });
 
+  // Wrong: filtering out a publisher on another host by the caller's local id.
+  it("accepts mail to a remote agent with the caller's id", async () => {
+    const { cantor, mac, lead } = await linked();
+    await mac.mailer.register(mac.paseo.add(lead.id, { title: "Probe" }), { name: "probe" });
+    await expect(cantor.mailer.send(lead, ["probe@m2-max"], "s", "b")).resolves.toMatchObject([
+      { serverId: MAC, agentId: "lead-id", name: "probe", address: "probe@m2-max" },
+    ]);
+  });
+
   // "other" publishes first. Wrong: taking the first publisher regardless of name (other-id); the
   // name as typed ("Probe"); the link label ("m2-max") or the caller's title in place of the serverId
   // or the recipient's title.

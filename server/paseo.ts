@@ -52,10 +52,11 @@ export class PaseoAdapter implements PaseoPort {
     const result = await (await this.peer(serverId)).agents.ref(agentId).refresh();
     const info = agentInfo(result);
     if (!info || !result) return null;
-    const handOffs: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(result.agent.metadata ?? {})) {
-      if (key.startsWith(OUT_PREFIX) && value !== null) handOffs[key.slice(OUT_PREFIX.length)] = value;
-    }
+    const handOffs = Object.fromEntries(
+      Object.entries(result.agent.metadata ?? {})
+        .filter(([key, value]) => key.startsWith(OUT_PREFIX) && value !== null)
+        .map(([key, value]) => [key.slice(OUT_PREFIX.length), value]),
+    );
     return { ...info, handOffs };
   }
 

@@ -389,6 +389,17 @@ describe("PaseoAdapter.peerAgent", () => {
     expect({ refreshed: peer.refreshed, listed: peer.listCalls.length, local: local.refreshed }).toEqual({ refreshed: ["a-remote"], listed: 0, local: [] });
   });
 
+  // A peer's key "paseo-mail.out.__proto__" holds an object. Wrong: assigning it on a plain object,
+  // which sets handOffs' prototype, so a record for m_1 inside that value reads as handOffs.m_1.
+  it("keeps a record key named __proto__ as an own entry, not as the prototype", async () => {
+    const record = { to: { serverId: "srv_Self1", agentId: "a-local" }, digest: "9a0b1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f" };
+    const { adapter } = pair([{ id: "a-remote", metadata: { "paseo-mail.out.__proto__": { m_1: record } } }]);
+    const handOffs = (await adapter.peerAgent("srv_Peer9", "a-remote"))!.handOffs;
+    expect(Object.getPrototypeOf(handOffs)).toBe(Object.prototype);
+    expect(Object.hasOwn(handOffs, "__proto__")).toBe(true);
+    expect(handOffs.m_1).toBeUndefined();
+  });
+
   // Wrong: `.catch(() => null)` folds an unreachable host into "missing", which would clear a drop that should park.
   it("rejects when refresh() rejects", async () => {
     const { peer, adapter } = pair([{ id: "a-remote" }]);

@@ -173,10 +173,11 @@ export class FakePaseo implements PaseoPort {
     const peer = this.peer(serverId, "peerAgent");
     const agent = await peer.agent(agentId);
     if (!agent) return null;
-    const handOffs: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(peer.metadata.get(agentId) ?? {})) {
-      if (key.startsWith(OUT_PREFIX) && value !== null) handOffs[key.slice(OUT_PREFIX.length)] = structuredClone(value);
-    }
+    const handOffs = Object.fromEntries(
+      Object.entries(peer.metadata.get(agentId) ?? {})
+        .filter(([key, value]) => key.startsWith(OUT_PREFIX) && value !== null)
+        .map(([key, value]) => [key.slice(OUT_PREFIX.length), structuredClone(value)]),
+    );
     return { ...agent, handOffs };
   }
 

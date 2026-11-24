@@ -197,11 +197,10 @@ describe("contribute", () => {
     }
   });
 
-  // Task 6 of paseo-mail#xsbz (design step 8): every turn end runs an import pass, whether the hook
-  // calls importDrops itself or through the Mailer method it calls. The baseline is taken once start()
-  // has settled, since start() imports too. The import then never settles. Wrong: turn.after only
-  // scheduling a nudge; the hook awaiting the import (it hangs with it).
-  it("runs an import pass after each turn, without waiting for it", async () => {
+  // Task 6 of paseo-mail#xsbz (design step 8): the turn-end hook requests an import. Count calls
+  // after start() settles because start() requests one too. Wrong: turn.after only schedules a
+  // nudge or awaits the import request (its promise never settles in this fixture).
+  it("requests an import after a turn without waiting for it", async () => {
     const start = vi.spyOn(Mailer.prototype, "start");
     const importDrops = vi.spyOn(Mailer.prototype, "importDrops").mockResolvedValue(undefined);
     try {

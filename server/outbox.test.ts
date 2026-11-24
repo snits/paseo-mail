@@ -1073,14 +1073,7 @@ describe("hand-off record (paseo-mail#qkf2)", () => {
       return record(agentId, mailId, value);
     };
     expect(await cantor.paseo.agent("gone-id")).toBeNull();
-    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    let logged: string[];
-    try {
-      await cantor.mailer.flushOutbox();
-      logged = errors.mock.calls.map((call) => call.map(String).join(" "));
-    } finally {
-      errors.mockRestore();
-    }
+    const lines = await logged(() => cantor.mailer.flushOutbox());
     expect(records(cantor.paseo).map((call) => [call.agentId, call.mailId])).toEqual([
       ["gone-id", "m_001"],
       ["lead-id", "m_002"],
@@ -1090,7 +1083,7 @@ describe("hand-off record (paseo-mail#qkf2)", () => {
     expect(stamped(cantor.store, "m_002")).toBe(true);
     expect(cantor.store.outbox().map((mail) => mail.id)).toEqual(["m_001"]);
     expect(stamped(cantor.store, "m_001")).toBe(false);
-    expect(logged.some((line) => line.includes("m_001"))).toBe(true);
+    expect(lines.some((line) => line.includes("m_001"))).toBe(true);
   });
 
   // Wrong: treating an archived sender as gone (looked up first, or after a write that succeeded),
